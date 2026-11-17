@@ -1,0 +1,99 @@
+# Cấu hình OpenSSL cho CA nội bộ (Root + Intermediate) và TSA
+[ca]
+default_ca = ca_int
+
+[ca_root]
+dir               = $ENV::PKI_DIR/root
+database          = $dir/index.txt
+serial            = $dir/serial
+crlnumber         = $dir/crlnumber
+new_certs_dir     = $dir/newcerts
+certificate       = $dir/root.crt
+private_key       = $dir/private/root.key
+default_md        = sha256
+default_days      = 3650
+default_crl_days  = 365
+policy            = policy_any
+unique_subject    = no
+copy_extensions   = none
+
+[ca_int]
+dir               = $ENV::PKI_DIR/int
+database          = $dir/index.txt
+serial            = $dir/serial
+crlnumber         = $dir/crlnumber
+new_certs_dir     = $dir/newcerts
+certificate       = $dir/int.crt
+private_key       = $dir/private/int.key
+default_md        = sha256
+default_days      = 365
+default_crl_days  = 30
+policy            = policy_any
+unique_subject    = no
+copy_extensions   = none
+
+[policy_any]
+countryName            = optional
+organizationName       = optional
+organizationalUnitName = optional
+commonName             = supplied
+
+[req]
+distinguished_name = req_dn
+prompt             = no
+[req_dn]
+CN = placeholder
+
+[v3_root]
+basicConstraints       = critical,CA:true
+keyUsage               = critical,keyCertSign,cRLSign
+subjectKeyIdentifier   = hash
+
+[v3_intermediate]
+basicConstraints       = critical,CA:true,pathlen:0
+keyUsage               = critical,keyCertSign,cRLSign
+subjectKeyIdentifier   = hash
+authorityKeyIdentifier = keyid,issuer
+crlDistributionPoints  = URI:$ENV::CRL_BASE/root.crl
+
+[v3_signer]
+basicConstraints       = critical,CA:false
+keyUsage               = critical,digitalSignature,nonRepudiation
+extendedKeyUsage       = emailProtection,1.2.840.113583.1.1.5
+subjectKeyIdentifier   = hash
+authorityKeyIdentifier = keyid,issuer
+crlDistributionPoints  = URI:$ENV::CRL_BASE/int.crl
+
+[v3_tsa]
+basicConstraints       = critical,CA:false
+keyUsage               = critical,digitalSignature
+extendedKeyUsage       = critical,timeStamping
+subjectKeyIdentifier   = hash
+authorityKeyIdentifier = keyid,issuer
+crlDistributionPoints  = URI:$ENV::CRL_BASE/int.crl
+
+[v3_server]
+basicConstraints       = critical,CA:false
+keyUsage               = critical,digitalSignature,keyEncipherment
+extendedKeyUsage       = serverAuth
+subjectKeyIdentifier   = hash
+authorityKeyIdentifier = keyid,issuer
+
+# --- TSA (RFC 3161) ---
+[tsa]
+default_tsa = tsa_config
+[tsa_config]
+dir                   = $ENV::PKI_DIR/tsa
+serial                = $dir/tsaserial
+signer_cert           = $dir/tsa.crt
+certs                 = $dir/tsa-chain.pem
+signer_key            = $dir/tsa.key
+signer_digest         = sha256
+default_policy        = 1.2.3.4.1
+other_policies        = 1.2.3.4.5
+digests               = sha256, sha384, sha512
+accuracy              = secs:1
+ordering              = yes
+tsa_name              = yes
+ess_cert_id_chain     = yes
+ess_cert_id_alg       = sha256

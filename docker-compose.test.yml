@@ -1,0 +1,40 @@
+# Ghi đè cho môi trường chạy test tự động (kết hợp với docker-compose.yml):
+#   docker compose -f docker-compose.yml -f docker-compose.test.yml --profile test run --rm tests
+services:
+  api:
+    environment:
+      COOKIE_SECURE: "false"
+
+  signer:
+    volumes:
+      - ${PKI_HOST_DIR:-./pki-data}/issued:/pki/issued:ro
+      - ${PKI_HOST_DIR:-./pki-data}/public:/pki/public:ro
+
+  tests:
+    profiles: [test]
+    build: {context: ., dockerfile: deploy/Dockerfile.tests}
+    image: esign-tests:latest
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+    environment:
+      CONVERTER_URL: http://converter:8001
+      SIGNER_URL: http://signer:9000
+      SIGNER_TOKEN: ${SIGNER_TOKEN:-test-signer-token-local}
+      TOTP_ENC_KEY: ${TOTP_ENC_KEY:?đặt TOTP_ENC_KEY}
+      API_LIVE_URL: http://api:8000
+      WEB_LIVE_URL: http://web:8080
+      CADDY_HTTPS_URL: https://caddy
+      CADDY_HTTP_URL: http://caddy
+      LIVE_ADMIN_USER: ${ADMIN_USERNAME:-admin}
+      LIVE_ADMIN_PASS: ${ADMIN_PASSWORD:-Adm1n-Pass-Strong}
+    networks: [internal, edge]
+    depends_on:
+      db: {condition: service_healthy}
+      converter: {condition: service_healthy}
+      signer: {condition: service_healthy}
+      api: {condition: service_healthy}
+      web: {condition: service_healthy}
+      caddy: {condition: service_healthy}
+      tsa: {condition: service_healthy}
+    command: ["bash", "./run_tests.sh"]

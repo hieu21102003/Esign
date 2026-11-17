@@ -1,0 +1,10 @@
+FROM debian:bookworm-slim
+ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8 LC_ALL=C.UTF-8 PYTHONDONTWRITEBYTECODE=1
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash openssl gnupg poppler-utils procps python3 python3-pip ca-certificates libatomic1 \
+    && rm -rf /var/lib/apt/lists/*
+COPY requirements.txt /tmp/req/root.txt
+COPY backend/requirements.txt /tmp/req/backend.txt
+RUN pip3 install --no-cache-dir --break-system-packages -r /tmp/req/root.txt -r /tmp/req/backend.txt pytest pyyaml playwright \
+    && playwright install chromium \
+    && playwright install-deps chromium

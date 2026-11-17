@@ -1,0 +1,102 @@
+"""Cấu hình backend. Mọi bí mật lấy từ biến môi trường hoặc file secret (<TÊN>_FILE), không hard-code."""
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from urllib.parse import quote_plus
+
+
+def read_secret(name: str, default: str = "") -> str:
+    v = os.environ.get(name)
+    if v:
+        return v
+    f = os.environ.get(name + "_FILE")
+    if f:
+        with open(f, "r", encoding="utf-8") as fh:
+            return fh.read().strip()
+    return default
+
+
+def _rate(name: str, default: str) -> tuple:
+    n, w = os.environ.get(name, default).split("/")
+    return int(n), int(w)
+
+
+def _bool(name: str, default: bool) -> bool:
+    v = os.environ.get(name)
+    return default if v is None else v.strip().lower() in ("1", "true", "yes", "on")
+
+
+@dataclass
+class Settings:
+    data_dir: str = "/data"
+    database_url: str = ""
+    converter_url: str = "http://converter:8001"
+    signer_url: str = "http://signer:9000"
+    signer_token: str = ""
+    totp_enc_key: str = ""
+    max_upload_bytes: int = 25 * 1024 * 1024
+    max_image_bytes: int = 2 * 1024 * 1024
+    max_pages: int = 500
+    retention_days: int = 7
+    session_ttl_minutes: int = 480
+    cookie_secure: bool = True
+    max_failed_logins: int = 5
+    lockout_minutes: int = 15
+    min_password_length: int = 10
+    login_rate: tuple = (10, 60)      # (số lần, cửa sổ giây) theo IP và theo username
+    sign_rate: tuple = (10, 60)       # theo user
+    upload_rate: tuple = (20, 60)     # theo user
+    verify_rate: tuple = (30, 60)     # theo user/IP
+    trust_proxy: bool = False         # chỉ bật khi sau reverse proxy tin cậy (Caddy)
+    trusted_proxies: list[str] = field(default_factory=list)
+    cleanup_interval_seconds: int = 3600
+    admin_username: str = ""
+    admin_password: str = ""
+    totp_issuer: str = "esign"
+    signer_timeout: int = 120
+    converter_timeout: int = 70
+
+    @property
+    def upload_dir(self) -> str:
+        return os.path.join(self.data_dir, "files")
+
+    @property
+    def db_url(self) -> str:
+        return self.database_url or "sqlite:///" + os.path.join(self.data_dir, "esign.db").replace("\\", "/")
+
+    @classmethod
+    def from_env(cls) -> "Settings":
+        db_url = os.environ.get("DATABASE_URL", "")
+        if not db_url and os.environ.get("DB_HOST"):
+            db_pw = quote_plus(read_secret("DB_PASSWORD"))
+            db_user = quote_plus(os.environ.get("DB_USER", "esign"))
+            db_host = os.environ["DB_HOST"]
+            db_port = os.environ.get("DB_PORT", "5432")
+            db_name = os.environ.get("DB_NAME", "esign")
+            db_url = f"postgresql+psycopg://{db_user}:{db_pw}@{db_host}:{db_port}/{db_name}"
+        proxies = [x.strip() for x in os.environ.get("TRUSTED_PROXIES", "").split(",") if x.strip()]
+        return cls(
+            data_dir=os.environ.get("DATA_DIR", "/data"),
+            database_url=db_url,
+            converter_url=os.environ.get("CONVERTER_URL", "http://converter:8001"),
+            signer_url=os.environ.get("SIGNER_URL", "http://signer:9000"),
+            signer_token=read_secret("SIGNER_TOKEN"),
+            totp_enc_key=read_secret("TOTP_ENC_KEY"),
+            max_upload_bytes=int(os.environ.get("MAX_UPLOAD_BYTES", str(25 * 1024 * 1024))),
+            retention_days=int(os.environ.get("RETENTION_DAYS", "7")),
+            session_ttl_minutes=int(os.environ.get("SESSION_TTL_MINUTES", "480")),
+            cookie_secure=_bool("COOKIE_SECURE", True),
+            max_failed_logins=int(os.environ.get("MAX_FAILED_LOGINS", "5")),
+            lockout_minutes=int(os.environ.get("LOCKOUT_MINUTES", "15")),
+            login_rate=_rate("RATE_LOGIN", "10/60"),
+            sign_rate=_rate("RATE_SIGN", "10/60"),
+            upload_rate=_rate("RATE_UPLOAD", "20/60"),
+            verify_rate=_rate("RATE_VERIFY", "30/60"),
+            trust_proxy=_bool("TRUST_PROXY", False),
+            trusted_proxies=proxies,
+            cleanup_interval_seconds=int(os.environ.get("CLEANUP_INTERVAL_SECONDS", "3600")),
+            admin_username=os.environ.get("ADMIN_USERNAME", ""),
+            admin_password=read_secret("ADMIN_PASSWORD"),
+            totp_issuer=os.environ.get("TOTP_ISSUER", "esign"),
+        )

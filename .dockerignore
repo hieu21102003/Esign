@@ -1,0 +1,15 @@
+**/__pycache__
+**/*.pyc
+.git
+test-data/root
+test-data/int
+test-data/issued
+test-data/tsa
+test-data/public
+data
+pki-data
+.env
+secrets
+pki-data
+frontend/node_modules
+frontend/dist

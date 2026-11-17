@@ -1,0 +1,45 @@
+{
+	auto_https disable_redirects
+}
+
+# HTTP (80): phục vụ CRL (DER) và Root CA công khai tại /pki/, còn lại chuyển hướng sang HTTPS (443)
+:80 {
+	handle_path /pki/* {
+		@crl path /int.crl /root.crl
+		rewrite @crl {path}.der
+		header @crl Content-Type application/pkix-crl
+		root * /srv/pki
+		file_server
+	}
+	handle {
+		redir https://{host}{uri} 308
+	}
+}
+
+# HTTPS (443) — cổng duy nhất ra ngoài cho ứng dụng web/API.
+:443 {
+	tls /etc/caddy/certs/server.crt /etc/caddy/certs/server.key
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	@api path /api/*
+	handle @api {
+		request_body {
+			max_size 25MB
+		}
+		reverse_proxy api:8000 {
+			header_up Host {host}
+			header_up X-Forwarded-Proto {scheme}
+		}
+	}
+
+	handle {
+		reverse_proxy web:8080
+	}
+}

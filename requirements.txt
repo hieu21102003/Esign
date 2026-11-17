@@ -1,0 +1,3 @@
+pyHanko[opentype,image-support]==0.38.1
+pyhanko-certvalidator==0.33.0
+pillow

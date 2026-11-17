@@ -1,0 +1,195 @@
+# Kiến trúc production tự host:
+# - Caddy là cổng duy nhất ra ngoài (80 -> 443 HTTPS).
+# - db, api, web, signer, converter, tsa KHÔNG mở port ra host.
+# - Bí mật lưu trong thư mục secrets/ (quyền 600), không nằm trong DB hay bản backup dữ liệu.
+# - root.key giữ offline, KHÔNG mount vào bất kỳ container nào.
+name: esign
+
+x-hardening: &hardening
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+
+networks:
+  internal:          # mạng nội bộ: không Internet
+    internal: true
+  edge:              # chỉ caddy, web, api gắn vào đây
+
+volumes:
+  api-data: {}
+  pg-data: {}
+  caddy-data: {}
+  caddy-config: {}
+
+secrets:
+  p12_passphrase:
+    file: ${SECRETS_DIR:-./secrets}/p12_passphrase
+  signer_token:
+    file: ${SECRETS_DIR:-./secrets}/signer_token
+  totp_enc_key:
+    file: ${SECRETS_DIR:-./secrets}/totp_enc_key
+  db_password:
+    file: ${SECRETS_DIR:-./secrets}/db_password
+  admin_password:
+    file: ${SECRETS_DIR:-./secrets}/admin_password
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: esign
+      POSTGRES_USER: esign
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    secrets: [db_password]
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    networks: [internal]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U esign -d esign"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  converter:
+    build: {context: ., dockerfile: converter/Dockerfile}
+    image: esign-converter:latest
+    restart: unless-stopped
+    entrypoint: ["python3", "/app/server.py"]
+    <<: *hardening
+    user: "10001:10001"
+    tmpfs: ["/tmp:rw,nosuid,nodev,size=512m"]
+    mem_limit: 1g
+    cpus: 1.5
+    pids_limit: 128
+    environment: {PORT: "8001", CONVERTER_MAX_PARALLEL: "2"}
+    networks: [internal]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8001/health',timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  signer:
+    build: {context: ., dockerfile: signer/Dockerfile}
+    image: esign-signer:latest
+    restart: unless-stopped
+    <<: *hardening
+    user: "10002:10002"
+    tmpfs: ["/tmp:rw,nosuid,nodev,size=128m"]
+    mem_limit: 512m
+    environment:
+      SIGNER_TOKEN_FILE: /run/secrets/signer_token
+      P12_PASSPHRASE_FILE: /run/secrets/p12_passphrase
+      TSA_URL: http://tsa:8318
+      KEYS_DIR: /pki/issued
+      PKI_PUBLIC: /pki/public
+    secrets: [signer_token, p12_passphrase]
+    volumes:
+      - ${PKI_HOST_DIR:-./pki-data}/issued:/pki/issued:ro
+      - ${PKI_HOST_DIR:-./pki-data}/public:/pki/public:ro
+      - ${PKI_HOST_DIR:-./pki-data}/tsa/tsa.crt:/pki/tsa/tsa.crt:ro
+    networks: [internal]
+    depends_on:
+      tsa: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:9000/health',timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  tsa:
+    build: {context: ., dockerfile: deploy/tsa/Dockerfile}
+    image: esign-tsa:latest
+    restart: unless-stopped
+    <<: *hardening
+    user: "${TSA_USER:-10003:10003}"
+    tmpfs: ["/tmp:rw,nosuid,nodev,size=16m"]
+    environment: {PKI_DIR: /pki, CRL_BASE: "http://localhost/pki"}
+    volumes:
+      - ${PKI_HOST_DIR:-./pki-data}/tsa:/pki/tsa
+      - ${PKI_HOST_DIR:-./pki-data}/public:/pki/public:ro
+    networks: [internal]
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import socket; s=socket.create_connection(('127.0.0.1',8318),2); s.close()\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  api:
+    build: {context: ., dockerfile: backend/Dockerfile}
+    image: esign-api:latest
+    restart: unless-stopped
+    <<: *hardening
+    tmpfs: ["/tmp:rw,nosuid,nodev,size=64m"]
+    mem_limit: 512m
+    environment:
+      DATA_DIR: /data
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_NAME: esign
+      DB_USER: esign
+      DB_PASSWORD_FILE: /run/secrets/db_password
+      CONVERTER_URL: http://converter:8001
+      SIGNER_URL: http://signer:9000
+      SIGNER_TOKEN_FILE: /run/secrets/signer_token
+      TOTP_ENC_KEY_FILE: /run/secrets/totp_enc_key
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD_FILE: /run/secrets/admin_password
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      TRUST_PROXY: "true"
+      TRUSTED_PROXIES: caddy
+    secrets: [signer_token, totp_enc_key, db_password, admin_password]
+    volumes:
+      - api-data:/data
+    networks: [internal, edge]
+    depends_on:
+      db: {condition: service_healthy}
+      converter: {condition: service_healthy}
+      signer: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/api/health',timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  web:
+    build: {context: ., dockerfile: frontend/Dockerfile}
+    image: esign-web:latest
+    restart: unless-stopped
+    <<: *hardening
+    tmpfs: ["/tmp:rw,nosuid,nodev,size=64m", "/var/cache/nginx:rw,nosuid,nodev,size=32m", "/var/run/nginx:rw,nosuid,nodev,size=8m"]
+    mem_limit: 128m
+    networks: [edge]
+    depends_on:
+      api: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/ >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: ["no-new-privileges:true"]
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${PKI_HOST_DIR:-./pki-data}/server:/etc/caddy/certs:ro
+      - ${PKI_HOST_DIR:-./pki-data}/public:/srv/pki:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks: [edge]
+    depends_on:
+      api: {condition: service_healthy}
+      web: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- --no-check-certificate https://127.0.0.1/api/health >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
