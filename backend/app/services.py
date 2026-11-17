@@ -76,13 +76,11 @@ def inspect_pdf(data: bytes, max_pages: int = 500) -> dict:
 
 
 def normalize_pdf_if_hybrid(data: bytes) -> bytes:
-    """Chuẩn hóa PDF hybrid-reference (có /XRefStm) khi file chưa có chữ ký để pyHanko strict verify được."""
+    """Chuẩn hóa PDF hybrid-reference (có /XRefStm ở bất kỳ revision nào) khi chưa có chữ ký."""
     if b"/XRefStm" not in data:
         return data
     try:
         r = PdfReader(io.BytesIO(data), strict=False)
-        if "/XRefStm" not in r.trailer:
-            return data
         # Nếu PDF đã có chữ ký số thì giữ nguyên từng byte để không phá chữ ký
         acro = r.trailer.get("/Root", {}).get("/AcroForm")
         if acro:
