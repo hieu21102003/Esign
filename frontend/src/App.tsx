@@ -1,15 +1,17 @@
 import React, { useEffect, useState } from "react";
 import { AdminView } from "./components/AdminView";
+import { DocumentsView } from "./components/DocumentsView";
 import { LoginView } from "./components/LoginView";
 import { SignWorkspace } from "./components/SignWorkspace";
 import { VerifyView } from "./components/VerifyView";
-import { apiJson, setCsrfToken, type MeResponse } from "./lib/api";
+import { apiJson, setCsrfToken, type MeResponse, type StoredFile } from "./lib/api";
 
 export function App() {
   const [me, setMe] = useState<MeResponse | null>(null);
   const [loading, setLoading] = useState(true);
-  const [tab, setTab] = useState<"sign" | "verify" | "admin">("sign");
+  const [tab, setTab] = useState<"sign" | "docs" | "verify" | "admin">("sign");
   const [verifyFileId, setVerifyFileId] = useState<string | null>(null);
+  const [openSignFile, setOpenSignFile] = useState<StoredFile | null>(null);
 
   async function refreshMe() {
     try {
@@ -63,6 +65,14 @@ export function App() {
             </button>
             <button
               type="button"
+              className={`btn small ${tab === "docs" ? "primary" : "ghost"}`}
+              onClick={() => setTab("docs")}
+              data-testid="tab-docs"
+            >
+              Tài liệu
+            </button>
+            <button
+              type="button"
               className={`btn small ${tab === "verify" ? "primary" : "ghost"}`}
               onClick={() => {
                 setVerifyFileId(null);
@@ -95,6 +105,19 @@ export function App() {
       <main className="main-wrap">
         {tab === "sign" && (
           <SignWorkspace
+            initialFile={openSignFile}
+            onGoVerify={(fid) => {
+              setVerifyFileId(fid);
+              setTab("verify");
+            }}
+          />
+        )}
+        {tab === "docs" && (
+          <DocumentsView
+            onOpenSign={(f) => {
+              setOpenSignFile(f);
+              setTab("sign");
+            }}
             onGoVerify={(fid) => {
               setVerifyFileId(fid);
               setTab("verify");

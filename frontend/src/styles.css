@@ -110,6 +110,8 @@ input[type="checkbox"] { width: auto; }
 .btn:disabled { opacity: 0.55; cursor: not-allowed; }
 .btn.primary { background: var(--primary); color: #fff; border-color: var(--primary); }
 .btn.primary:hover:not(:disabled) { background: var(--primary-hover); }
+.btn.danger { color: var(--danger); border-color: #fecdca; }
+.btn.danger:hover:not(:disabled) { background: var(--danger-bg); }
 .btn.ghost { border-color: transparent; background: transparent; }
 .btn.small { padding: 5px 10px; font-size: 12px; }
 .btn.tiny { padding: 3px 7px; font-size: 11px; }

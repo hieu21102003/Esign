@@ -19,10 +19,11 @@ const ALL_SHOW: { key: ShowField; label: string }[] = [
 ];
 
 interface Props {
+  initialFile?: StoredFile | null;
   onGoVerify: (fileId: string) => void;
 }
 
-export function SignWorkspace({ onGoVerify }: Props) {
+export function SignWorkspace({ initialFile = null, onGoVerify }: Props) {
   const [files, setFiles] = useState<StoredFile[]>([]);
   const [selectedFile, setSelectedFile] = useState<StoredFile | null>(null);
   const [pdfBytes, setPdfBytes] = useState<Uint8Array | null>(null);
@@ -69,6 +70,15 @@ export function SignWorkspace({ onGoVerify }: Props) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (initialFile) {
+      selectAndLoadFile(initialFile).catch((ex) =>
+        setErr(ex instanceof Error ? ex.message : "Không mở được tài liệu"),
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialFile?.id]);
 
   async function selectAndLoadFile(f: StoredFile) {
     setErr("");
@@ -166,6 +176,26 @@ export function SignWorkspace({ onGoVerify }: Props) {
     setPresets((prev) => prev.filter((p) => p.id !== pid));
   }
 
+  async function handleDeleteFile(f: StoredFile) {
+    if (!window.confirm(`Xóa tài liệu "${f.name}"?`)) return;
+    setErr("");
+    setMsg("");
+    try {
+      await apiJson(`/api/files/${f.id}`, { method: "DELETE" });
+      if (selectedFile?.id === f.id) {
+        setSelectedFile(null);
+        setPdfBytes(null);
+      }
+      if (signedFile?.id === f.id) {
+        setSignedFile(null);
+      }
+      await refreshLists();
+      setMsg(`Đã xóa "${f.name}"`);
+    } catch (ex) {
+      setErr(ex instanceof Error ? ex.message : "Xóa tài liệu thất bại");
+    }
+  }
+
   async function handleSign() {
     if (!selectedFile || certId === "") return;
     setErr("");
@@ -241,6 +271,15 @@ export function SignWorkspace({ onGoVerify }: Props) {
                   >
                     Tải
                   </a>
+                  <button
+                    type="button"
+                    className="btn tiny danger"
+                    onClick={() => handleDeleteFile(f)}
+                    title="Xóa tài liệu"
+                    data-testid={`quick-delete-${f.id}`}
+                  >
+                    Xóa
+                  </button>
                 </div>
               ))}
             </div>
