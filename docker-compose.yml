@@ -140,6 +140,12 @@ services:
       TRUST_PROXY: "true"
       TRUSTED_PROXIES: caddy
       WORKFLOW_RETENTION_DAYS: ${WORKFLOW_RETENTION_DAYS:-0}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      SMTP_TLS: ${SMTP_TLS:-true}
     secrets: [signer_token, totp_enc_key, db_password, admin_password]
     volumes:
       - api-data:/data

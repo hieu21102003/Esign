@@ -119,3 +119,130 @@ export interface SignatureVerifyItem {
   summary?: string;
   error?: string;
 }
+
+export interface UserBrief {
+  id: number | null;
+  username: string;
+  display_name: string;
+}
+
+export interface AssignableUser {
+  id: number;
+  username: string;
+  display_name: string;
+  has_cert: boolean;
+}
+
+export type WorkflowStatus = "in_progress" | "completed" | "rejected" | "cancelled";
+
+export interface WorkflowAssignee {
+  id: number;
+  user: UserBrief;
+  status: "pending" | "signed" | "rejected" | "skipped";
+  signed_at: string | null;
+  remark: string | null;
+  signed_file_id: string | null;
+}
+
+export interface WorkflowStep {
+  id: number;
+  step_order: number;
+  mode: "all" | "any";
+  status: "active" | "completed" | "rejected" | "cancelled";
+  assigned_by: UserBrief;
+  created_at: string;
+  completed_at: string | null;
+  assignees: WorkflowAssignee[];
+}
+
+export interface WorkflowVersion {
+  version_no: number;
+  file_id: string;
+  step_id: number | null;
+  created_by: UserBrief;
+  note: string | null;
+  sha256: string;
+  size: number;
+  created_at: string;
+}
+
+export interface WorkflowDocumentSummary {
+  id: string;
+  title: string;
+  description: string;
+  status: WorkflowStatus;
+  creator: UserBrief;
+  original_file_id: string;
+  current_file_id: string;
+  current_step_order: number;
+  total_steps: number;
+  my_pending: boolean;
+  awaiting_next_step: boolean;
+  can_assign_or_complete: boolean;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+  rejected_at: string | null;
+  cancelled_at: string | null;
+  cancel_reason: string | null;
+}
+
+export interface WorkflowDocumentDetail extends WorkflowDocumentSummary {
+  current_file: {
+    id: string;
+    name: string;
+    size: number;
+    sha256: string;
+    pages: number;
+    page_sizes: [number, number][];
+  } | null;
+  steps: WorkflowStep[];
+  versions: WorkflowVersion[];
+  can_sign: boolean;
+  can_decide_next_on_sign: boolean;
+  can_reject: boolean;
+  can_cancel: boolean;
+}
+
+export interface TimelineEvent {
+  id: number;
+  ts: string;
+  user_id: number | null;
+  username: string;
+  action: string;
+  status: string;
+  ip: string;
+  file_id: string | null;
+  cert_key_ref: string | null;
+  detail: string | null;
+  metadata: Record<string, unknown> | null;
+}
+
+export interface WorkflowTimeline {
+  document_id: string;
+  title: string;
+  status: WorkflowStatus;
+  created_at: string;
+  completed_at: string | null;
+  rejected_at: string | null;
+  cancelled_at: string | null;
+  cancel_reason: string | null;
+  steps: WorkflowStep[];
+  events: TimelineEvent[];
+}
+
+export interface NotificationItem {
+  id: number;
+  document_id: string | null;
+  kind: "assigned" | "completed" | "rejected" | "cancelled";
+  title: string;
+  message: string;
+  is_read: boolean;
+  created_at: string;
+  read_at: string | null;
+}
+
+export interface NotificationsResponse {
+  unread_count: number;
+  items: NotificationItem[];
+}

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import List, Literal
+from typing import List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -20,13 +20,28 @@ log = logging.getLogger("esign.pki")
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 USERNAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,63}$")
 KEY_REF_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _clean_email(v: Optional[str]) -> Optional[str]:
+    if not v or not v.strip():
+        return None
+    s = v.strip().lower()
+    if len(s) > 255 or not EMAIL_RE.match(s):
+        raise HTTPException(400, "Email không hợp lệ")
+    return s
 
 
 class UserIn(BaseModel):
     username: str = Field(max_length=64)
     password: str = Field(max_length=256)
     display_name: str = Field("", max_length=120)
+    email: Optional[str] = Field(None, max_length=255)
     role: Literal["admin", "user"] = "user"
+
+
+class EmailIn(BaseModel):
+    email: Optional[str] = Field(None, max_length=255)
 
 
 class CertIn(BaseModel):
@@ -61,8 +76,8 @@ def create_user(body: UserIn, request: Request, ctx: Ctx = Depends(require_admin
         raise HTTPException(400, err)
     if db.scalar(select(User).where(User.username == username)):
         raise HTTPException(409, "Username đã tồn tại")
-    u = User(username=username, display_name=body.display_name.strip(), password_hash=hash_password(body.password),
-             role=body.role)
+    u = User(username=username, display_name=body.display_name.strip(), email=_clean_email(body.email),
+             password_hash=hash_password(body.password), role=body.role)
     db.add(u)
     db.commit()
     audit(db, ctx.ip, "user_create", user=ctx.user, detail=f"target={username} role={u.role}")
@@ -102,6 +117,15 @@ def unlock_user(uid: int, ctx: Ctx = Depends(require_admin), db=Depends(get_db))
     u.locked_until, u.failed_attempts = None, 0
     db.commit()
     audit(db, ctx.ip, "user_unlock", user=ctx.user, detail=f"target={u.username}")
+    return _user_out(u)
+
+
+@router.put("/users/{uid}/email")
+def update_user_email(uid: int, body: EmailIn, ctx: Ctx = Depends(require_admin), db=Depends(get_db)):
+    u = _get_user(db, uid)
+    u.email = _clean_email(body.email)
+    db.commit()
+    audit(db, ctx.ip, "user_update_email", user=ctx.user, detail=f"target={u.username}")
     return _user_out(u)
 
 

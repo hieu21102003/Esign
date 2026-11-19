@@ -15,6 +15,7 @@ interface Props {
   reason: string;
   signerName: string;
   imagePreviewUrl: string | null;
+  interactive?: boolean;
 }
 
 export function PdfPreviewBox({
@@ -27,6 +28,7 @@ export function PdfPreviewBox({
   reason,
   signerName,
   imagePreviewUrl,
+  interactive = true,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [doc, setDoc] = useState<pdfjsLib.PDFDocumentProxy | null>(null);
@@ -218,7 +220,7 @@ export function PdfPreviewBox({
             style={{ width: vp ? vp.width : undefined, height: vp ? vp.height : undefined }}
           >
             <canvas ref={canvasRef} className="pdf-canvas" data-testid="pdf-canvas" />
-            {vp && (
+            {vp && interactive && (
               <div
                 className="sig-box"
                 data-testid="sig-box"
@@ -257,7 +259,7 @@ export function PdfPreviewBox({
         )}
       </div>
 
-      {vp && (
+      {vp && interactive && (
         <div className="coords-bar mono" data-testid="coords-bar">
           Tọa độ PDF (pt): [{box.map((v) => v.toFixed(1)).join(", ")}]
         </div>

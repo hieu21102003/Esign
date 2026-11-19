@@ -11,7 +11,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 
-from . import routes_admin, routes_auth, routes_files, routes_workflow
+from . import routes_admin, routes_auth, routes_files, routes_notifications, routes_workflow
 from .cleanup import CleanupThread
 from .config import Settings
 from .models import User, init_db, make_engine, make_session_factory
@@ -102,5 +102,6 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     app.include_router(routes_auth.router)
     app.include_router(routes_admin.router)
     app.include_router(routes_files.router)
+    app.include_router(routes_notifications.router)
     app.include_router(routes_workflow.router)
     return app

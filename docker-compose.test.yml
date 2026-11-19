@@ -1,14 +1,206 @@
-# Ghi đè cho môi trường chạy test tự động (kết hợp với docker-compose.yml):
-#   docker compose -f docker-compose.yml -f docker-compose.test.yml --profile test run --rm tests
+# Môi trường kiểm thử ĐỘC LẬP HOÀN TOÀN (tách biệt tên project, mạng, DB tạm, secrets tạm, không đụng .env hay production):
+#   docker compose -f docker-compose.test.yml --profile test run --rm tests
+#   docker compose -f docker-compose.test.yml --profile test down -v
+name: esign-test
+
+networks:
+  internal:
+    internal: true
+  edge: {}
+
 services:
-  api:
+  pki-init:
+    build: {context: ., dockerfile: deploy/Dockerfile.tests}
+    image: esign-tests:latest
+    working_dir: /workspace
+    restart: "no"
+    volumes:
+      - .:/workspace
     environment:
-      COOKIE_SECURE: "false"
+      PKI_DIR: /workspace/test-data
+      ROOT_PASS: rootpw
+      INT_PASS: intpw
+      USER_PASS: userpw
+      ORG: "Demo Org"
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+        rm -rf test-data/root test-data/int test-data/issued test-data/tsa test-data/public test-data/server test-data/.live_admin_totp test-data/*_out.pdf
+        cd pki
+        ./ca.sh init >/dev/null
+        ./ca.sh server server caddy localhost 127.0.0.1 >/dev/null
+        chown -R 10003:10003 /workspace/test-data/tsa
+        chmod 755 /workspace/test-data/issued /workspace/test-data/public /workspace/test-data/server
+
+  db:
+    image: postgres:16-alpine
+    restart: "no"
+    environment:
+      POSTGRES_DB: esign_test
+      POSTGRES_USER: esign_test
+      POSTGRES_PASSWORD: esign-test-db-pw
+    tmpfs: ["/var/lib/postgresql/data:rw,nosuid,nodev,size=256m"]
+    networks: [internal]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U esign_test -d esign_test"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  converter:
+    build: {context: ., dockerfile: converter/Dockerfile}
+    image: esign-converter:latest
+    restart: "no"
+    entrypoint: ["python3", "/app/server.py"]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    user: "10001:10001"
+    tmpfs: ["/tmp:rw,nosuid,nodev,size=512m"]
+    mem_limit: 1g
+    cpus: 1.5
+    pids_limit: 128
+    environment: {PORT: "8001", CONVERTER_MAX_PARALLEL: "2"}
+    networks: [internal]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8001/health',timeout=3)"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  tsa:
+    build: {context: ., dockerfile: deploy/tsa/Dockerfile}
+    image: esign-tsa:latest
+    restart: "no"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    user: "10003:10003"
+    tmpfs: ["/tmp:rw,nosuid,nodev,size=16m"]
+    environment: {PKI_DIR: /pki, CRL_BASE: "http://localhost/pki"}
+    volumes:
+      - ./test-data/tsa:/pki/tsa
+      - ./test-data/public:/pki/public:ro
+    networks: [internal]
+    depends_on:
+      pki-init: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import socket; s=socket.create_connection(('127.0.0.1',8318),2); s.close()\""]
+      interval: 3s
+      timeout: 3s
+      retries: 20
 
   signer:
+    build: {context: ., dockerfile: signer/Dockerfile}
+    image: esign-signer:latest
+    restart: "no"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    user: "10002:10002"
+    tmpfs: ["/tmp:rw,nosuid,nodev,size=128m"]
+    mem_limit: 512m
+    environment:
+      SIGNER_TOKEN: test-signer-token-local
+      P12_PASSPHRASE: userpw
+      TSA_URL: http://tsa:8318
+      KEYS_DIR: /pki/issued
+      PKI_PUBLIC: /pki/public
     volumes:
-      - ${PKI_HOST_DIR:-./pki-data}/issued:/pki/issued:ro
-      - ${PKI_HOST_DIR:-./pki-data}/public:/pki/public:ro
+      - ./test-data/issued:/pki/issued:ro
+      - ./test-data/public:/pki/public:ro
+      - ./test-data/tsa:/pki/tsa:ro
+    networks: [internal]
+    depends_on:
+      pki-init: {condition: service_completed_successfully}
+      tsa: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:9000/health',timeout=3)"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build: {context: ., dockerfile: backend/Dockerfile}
+    image: esign-api:latest
+    restart: "no"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: ["/data:rw,nosuid,nodev,uid=10004,gid=10004,mode=700,size=128m", "/tmp:rw,nosuid,nodev,size=64m"]
+    mem_limit: 512m
+    entrypoint:
+      - python3
+      - -c
+      - "import os; from cryptography.fernet import Fernet; os.environ.setdefault('TOTP_ENC_KEY', Fernet.generate_key().decode()); os.execvp('uvicorn', ['uvicorn', 'app.main:create_app', '--factory', '--host', '0.0.0.0', '--port', '8000', '--no-server-header', '--workers', '1'])"
+    environment:
+      DATA_DIR: /data
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_NAME: esign_test
+      DB_USER: esign_test
+      DB_PASSWORD: esign-test-db-pw
+      CONVERTER_URL: http://converter:8001
+      SIGNER_URL: http://signer:9000
+      SIGNER_TOKEN: test-signer-token-local
+      ADMIN_USERNAME: admin
+      ADMIN_PASSWORD: Adm1n-Pass-Strong
+      COOKIE_SECURE: "false"
+      TRUST_PROXY: "true"
+      TRUSTED_PROXIES: caddy
+      WORKFLOW_RETENTION_DAYS: "0"
+    networks: [internal, edge]
+    depends_on:
+      db: {condition: service_healthy}
+      converter: {condition: service_healthy}
+      signer: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/api/health',timeout=3)"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  web:
+    build: {context: ., dockerfile: frontend/Dockerfile}
+    image: esign-web:latest
+    restart: "no"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: ["/tmp:rw,nosuid,nodev,size=64m", "/var/cache/nginx:rw,nosuid,nodev,size=32m", "/var/run/nginx:rw,nosuid,nodev,size=8m"]
+    mem_limit: 128m
+    networks: [edge]
+    depends_on:
+      api: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/ >/dev/null 2>&1 || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  caddy:
+    image: caddy:2-alpine
+    restart: "no"
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: ["/data:rw,nosuid,nodev,size=16m", "/config:rw,nosuid,nodev,size=16m"]
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./test-data/server:/etc/caddy/certs:ro
+      - ./test-data/public:/srv/pki:ro
+    networks: [edge]
+    depends_on:
+      pki-init: {condition: service_completed_successfully}
+      api: {condition: service_healthy}
+      web: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- --no-check-certificate https://127.0.0.1/api/health >/dev/null 2>&1 || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
 
   tests:
     profiles: [test]
@@ -20,14 +212,13 @@ services:
     environment:
       CONVERTER_URL: http://converter:8001
       SIGNER_URL: http://signer:9000
-      SIGNER_TOKEN: ${SIGNER_TOKEN:-test-signer-token-local}
-      TOTP_ENC_KEY: ${TOTP_ENC_KEY:?đặt TOTP_ENC_KEY}
+      SIGNER_TOKEN: test-signer-token-local
       API_LIVE_URL: http://api:8000
       WEB_LIVE_URL: http://web:8080
       CADDY_HTTPS_URL: https://caddy
       CADDY_HTTP_URL: http://caddy
-      LIVE_ADMIN_USER: ${ADMIN_USERNAME:-admin}
-      LIVE_ADMIN_PASS: ${ADMIN_PASSWORD:-Adm1n-Pass-Strong}
+      LIVE_ADMIN_USER: admin
+      LIVE_ADMIN_PASS: Adm1n-Pass-Strong
     networks: [internal, edge]
     depends_on:
       db: {condition: service_healthy}

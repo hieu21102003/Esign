@@ -3,6 +3,7 @@
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 export PKI_DIR="$HERE/test-data" ROOT_PASS=rootpw INT_PASS=intpw USER_PASS=userpw ORG="Demo Org"
+export TOTP_ENC_KEY="${TOTP_ENC_KEY:-$(python3 -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')}"
 D=$PKI_DIR; P=$D/public; T=http://127.0.0.1:8318
 PASS=0; FAIL=0
 ok()   { echo "  [PASS] $1"; PASS=$((PASS+1)); }
@@ -75,7 +76,7 @@ chk "M3: End-to-end .docx -> PDF -> ký số -> verify (pyHanko & pdfsig)" "sign
 
 if [ -n "${SIGNER_URL:-}" ] && [ -n "${CONVERTER_URL:-}" ]; then
   echo "== M4 + M5 + M6: Backend, Frontend Playwright, Caddy HTTPS, CRL & Backup =="
-  ( cd "$HERE/pki" && ./ca.sh issue carol "Lê Văn C" 365 && ./ca.sh issue dave "Phạm Thị D" 365 && ./ca.sh issue erin "Hoàng Văn E" 365 && ./ca.sh server test_srv caddy localhost 127.0.0.1 && ROOT_PASS="" ./ca.sh crl-int ) >/dev/null 2>&1
+  ( cd "$HERE/pki" && ./ca.sh issue carol "Lê Văn C" 365 && ./ca.sh issue dave "Phạm Thị D" 365 && ./ca.sh issue erin "Hoàng Văn E" 365 && ./ca.sh issue frank "Đặng Thị F" 365 && ./ca.sh server test_srv caddy localhost 127.0.0.1 && ROOT_PASS="" ./ca.sh crl-int ) >/dev/null 2>&1
   chown 10002:10002 "$D"/issued/*.p12 2>/dev/null || true
   chown -R 10003:10003 "$D/tsa" 2>/dev/null || true
   if pytest -q "$HERE/backend/tests" --tb=short >/tmp/pytest_m46.log 2>&1; then

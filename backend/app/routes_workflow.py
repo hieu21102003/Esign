@@ -18,6 +18,7 @@ from .audit import audit
 from .deps import Ctx, get_db, rate_limit, require_mfa
 from .models import (
     DOC_STATUSES,
+    AuditLog,
     Certificate,
     Document,
     DocumentVersion,
@@ -29,6 +30,7 @@ from .models import (
     WorkflowStep,
     utcnow,
 )
+from .notifications import dispatch_emails, notify_users
 from .routes_files import SignParams, validate_sign_inputs
 from .services import ServiceError, b64, inspect_pdf, signer_sign, signer_verify
 from .storage import get_file, read_bytes, remove_from_disk, store_bytes
@@ -88,6 +90,52 @@ class DocumentSignIn(SignParams):
         if self.next_action != "assign" and self.next_assignee_ids:
             raise ValueError("Chỉ truyền next_assignee_ids khi next_action='assign'")
         return self
+
+
+class RejectIn(BaseModel):
+    reason: str = Field(min_length=1, max_length=500)
+
+    @field_validator("reason")
+    @classmethod
+    def _reason(cls, v: str) -> str:
+        s = _CTRL.sub(" ", v).strip()
+        if not s:
+            raise ValueError("Cần nhập lý do từ chối")
+        return s
+
+
+class CancelIn(BaseModel):
+    reason: str = Field("", max_length=500)
+
+    @field_validator("reason")
+    @classmethod
+    def _reason(cls, v: str) -> str:
+        return _CTRL.sub(" ", v).strip()
+
+
+def _actor_label(u: Optional[User]) -> str:
+    if u is None:
+        return ""
+    return u.display_name or u.username
+
+
+def _stakeholder_ids(
+    db, doc: Document, *, include_all_assignees: bool = False, include_active_step: bool = False
+) -> set[int]:
+    ids: set[int] = {doc.creator_id}
+    rows = db.execute(
+        select(StepAssignee.user_id, StepAssignee.status, WorkflowStep.step_order)
+        .join(WorkflowStep, StepAssignee.step_id == WorkflowStep.id)
+        .where(WorkflowStep.document_id == doc.id)
+    )
+    for uid, st_val, step_order in rows:
+        if (
+            include_all_assignees
+            or st_val == "signed"
+            or (include_active_step and step_order == doc.current_step_order)
+        ):
+            ids.add(uid)
+    return ids
 
 
 def _user_brief(u: Optional[User], fallback_id: Optional[int] = None) -> dict:
@@ -197,12 +245,39 @@ def _summary_from_graph(doc: Document, steps, assignees_by_step, users, viewer: 
         "completed_at": doc.completed_at.isoformat() if doc.completed_at else None,
         "rejected_at": doc.rejected_at.isoformat() if doc.rejected_at else None,
         "cancelled_at": doc.cancelled_at.isoformat() if doc.cancelled_at else None,
+        "cancel_reason": doc.cancel_reason,
     }
 
 
 def _document_summary(db, doc: Document, viewer: User) -> dict:
     steps, assignees_by_step, _versions, users = _load_doc_graph(db, doc)
     return _summary_from_graph(doc, steps, assignees_by_step, users, viewer)
+
+
+def _serialize_steps(steps, assignees_by_step, users) -> list[dict]:
+    return [
+        {
+            "id": s.id,
+            "step_order": s.step_order,
+            "mode": s.mode,
+            "status": s.status,
+            "assigned_by": _user_brief(users.get(s.assigned_by_id), s.assigned_by_id),
+            "created_at": s.created_at.isoformat(),
+            "completed_at": s.completed_at.isoformat() if s.completed_at else None,
+            "assignees": [
+                {
+                    "id": a.id,
+                    "user": _user_brief(users.get(a.user_id), a.user_id),
+                    "status": a.status,
+                    "signed_at": a.signed_at.isoformat() if a.signed_at else None,
+                    "remark": a.remark,
+                    "signed_file_id": a.signed_file_id,
+                }
+                for a in assignees_by_step.get(s.id, [])
+            ],
+        }
+        for s in steps
+    ]
 
 
 def _document_detail(db, st, doc: Document, viewer: User) -> dict:
@@ -237,29 +312,7 @@ def _document_detail(db, st, doc: Document, viewer: User) -> dict:
             "pages": cur_file.pages,
             "page_sizes": page_sizes,
         } if cur_file else None,
-        "steps": [
-            {
-                "id": s.id,
-                "step_order": s.step_order,
-                "mode": s.mode,
-                "status": s.status,
-                "assigned_by": _user_brief(users.get(s.assigned_by_id), s.assigned_by_id),
-                "created_at": s.created_at.isoformat(),
-                "completed_at": s.completed_at.isoformat() if s.completed_at else None,
-                "assignees": [
-                    {
-                        "id": a.id,
-                        "user": _user_brief(users.get(a.user_id), a.user_id),
-                        "status": a.status,
-                        "signed_at": a.signed_at.isoformat() if a.signed_at else None,
-                        "remark": a.remark,
-                        "signed_file_id": a.signed_file_id,
-                    }
-                    for a in assignees_by_step.get(s.id, [])
-                ],
-            }
-            for s in steps
-        ],
+        "steps": _serialize_steps(steps, assignees_by_step, users),
         "versions": [
             {
                 "version_no": v.version_no,
@@ -349,7 +402,14 @@ def create_document(body: DocumentCreateIn, request: Request, ctx: Ctx = Depends
         metadata={"step_id": step.id, "step_order": 1, "mode": body.mode, "assignee_ids": assignee_ids},
         commit=False,
     )
+    email_jobs = notify_users(
+        db, st, assignee_ids, document_id=doc.id, kind="assigned",
+        title=f"Cần ký tài liệu: {doc.title}",
+        message=f"{_actor_label(ctx.user)} đã giao cho bạn ký tài liệu \"{doc.title}\" (Bước 1).",
+        commit=False,
+    )
     db.commit()
+    dispatch_emails(st, email_jobs)
     return _document_detail(db, st, doc, ctx.user)
 
 
@@ -398,9 +458,57 @@ def list_documents(
 
 
 @router.get("/documents/{doc_id}")
-def get_document(doc_id: str, request: Request, ctx: Ctx = Depends(require_mfa), db=Depends(get_db)):
+def get_document(
+    doc_id: str, request: Request, track: bool = True,
+    ctx: Ctx = Depends(require_mfa), db=Depends(get_db),
+):
     doc = _get_doc_for_view(db, doc_id, ctx.user)
+    if track:
+        audit(
+            db, ctx.ip, "doc_view", user=ctx.user, document_id=doc.id,
+            file_id=doc.current_file_id,
+        )
     return _document_detail(db, request.app.state.settings, doc, ctx.user)
+
+
+@router.get("/documents/{doc_id}/timeline")
+def document_timeline(doc_id: str, ctx: Ctx = Depends(require_mfa), db=Depends(get_db)):
+    doc = _get_doc_for_view(db, doc_id, ctx.user)
+    steps, assignees_by_step, _versions, users = _load_doc_graph(db, doc)
+    logs = list(db.scalars(select(AuditLog).where(AuditLog.document_id == doc.id).order_by(AuditLog.id)))
+    events = []
+    for a in logs:
+        meta = None
+        if a.metadata_json:
+            try:
+                meta = json.loads(a.metadata_json)
+            except ValueError:
+                meta = None
+        events.append({
+            "id": a.id,
+            "ts": a.ts.isoformat(),
+            "user_id": a.user_id,
+            "username": a.username,
+            "action": a.action,
+            "status": a.status,
+            "ip": a.ip,
+            "file_id": a.file_id,
+            "cert_key_ref": a.cert_key_ref,
+            "detail": a.detail,
+            "metadata": meta,
+        })
+    return {
+        "document_id": doc.id,
+        "title": doc.title,
+        "status": doc.status,
+        "created_at": doc.created_at.isoformat(),
+        "completed_at": doc.completed_at.isoformat() if doc.completed_at else None,
+        "rejected_at": doc.rejected_at.isoformat() if doc.rejected_at else None,
+        "cancelled_at": doc.cancelled_at.isoformat() if doc.cancelled_at else None,
+        "cancel_reason": doc.cancel_reason,
+        "steps": _serialize_steps(steps, assignees_by_step, users),
+        "events": events,
+    }
 
 
 def _resolve_doc_file(db, doc: Document, version_no: Optional[int] = None) -> StoredFile:
@@ -593,6 +701,7 @@ def sign_document(
                 commit=False,
             )
 
+            email_jobs: list[tuple[str, str, str]] = []
             if will_complete_step:
                 if step.mode == "any":
                     for other in other_pending:
@@ -609,6 +718,12 @@ def sign_document(
                                   "mode": body.next_mode, "assignee_ids": next_uids},
                         commit=False,
                     )
+                    email_jobs = notify_users(
+                        db, st, next_uids, document_id=doc.id, kind="assigned",
+                        title=f"Cần ký tài liệu: {doc.title}",
+                        message=f"{_actor_label(actor)} đã chuyển tiếp cho bạn ký tài liệu \"{doc.title}\" (Bước {next_step.step_order}).",
+                        commit=False,
+                    )
                 elif body.next_action == "complete":
                     doc.status = "completed"
                     doc.completed_at = now
@@ -617,8 +732,16 @@ def sign_document(
                         file_id=out.id, output_sha256=out.sha256,
                         metadata={"final_version_no": next_ver}, commit=False,
                     )
+                    recipients = _stakeholder_ids(db, doc) - {uid}
+                    email_jobs = notify_users(
+                        db, st, recipients, document_id=doc.id, kind="completed",
+                        title=f"Tài liệu hoàn tất: {doc.title}",
+                        message=f"Tài liệu \"{doc.title}\" đã hoàn tất đầy đủ chữ ký (người chốt: {_actor_label(actor)}).",
+                        commit=False,
+                    )
 
             db.commit()
+            dispatch_emails(st, email_jobs)
         except Exception:
             db.rollback()
             remove_from_disk(st, out.id)
@@ -658,7 +781,14 @@ def assign_next_step(
                       "mode": body.mode, "assignee_ids": next_uids},
             commit=False,
         )
+        email_jobs = notify_users(
+            db, st, next_uids, document_id=doc.id, kind="assigned",
+            title=f"Cần ký tài liệu: {doc.title}",
+            message=f"{_actor_label(actor)} đã chuyển tiếp cho bạn ký tài liệu \"{doc.title}\" (Bước {next_step.step_order}).",
+            commit=False,
+        )
         db.commit()
+        dispatch_emails(st, email_jobs)
         return _document_detail(db, st, doc, actor)
 
 
@@ -685,5 +815,113 @@ def complete_document(doc_id: str, request: Request, ctx: Ctx = Depends(require_
             file_id=doc.current_file_id, output_sha256=cur_file.sha256 if cur_file else None,
             commit=False,
         )
+        recipients = _stakeholder_ids(db, doc) - {uid}
+        email_jobs = notify_users(
+            db, st, recipients, document_id=doc.id, kind="completed",
+            title=f"Tài liệu hoàn tất: {doc.title}",
+            message=f"Tài liệu \"{doc.title}\" đã hoàn tất đầy đủ chữ ký (người chốt: {_actor_label(actor)}).",
+            commit=False,
+        )
         db.commit()
+        dispatch_emails(st, email_jobs)
+        return _document_detail(db, st, doc, actor)
+
+
+@router.post("/documents/{doc_id}/reject")
+def reject_document(
+    doc_id: str, body: RejectIn, request: Request, ctx: Ctx = Depends(require_mfa), db=Depends(get_db)
+):
+    st = request.app.state.settings
+    _validate_uuid(doc_id)
+    uid, ip = ctx.user.id, ctx.ip
+
+    with _doc_lock(doc_id):
+        actor, doc, step, assignees = _load_locked_doc_and_step(db, doc_id, uid)
+        if step.status != "active":
+            raise HTTPException(409, "Bước hiện tại đã hoàn tất, không thể từ chối")
+        me = next((a for a in assignees if a.user_id == uid), None)
+        if me is None:
+            raise HTTPException(403, "Bạn không được giao ký ở bước hiện tại")
+        if me.status != "pending":
+            raise HTTPException(409, "Lượt ký của bạn không còn ở trạng thái chờ")
+
+        now = utcnow()
+        me.status = "rejected"
+        me.signed_at = now
+        me.remark = body.reason
+        for other in assignees:
+            if other.id != me.id and other.status == "pending":
+                other.status = "skipped"
+        step.status = "rejected"
+        step.completed_at = now
+        doc.status = "rejected"
+        doc.rejected_at = now
+        doc.updated_at = now
+
+        audit(
+            db, ip, "doc_reject", user=actor, document_id=doc.id, file_id=doc.current_file_id,
+            detail=body.reason, metadata={"step_id": step.id, "step_order": step.step_order, "reason": body.reason},
+            commit=False,
+        )
+        recipients = _stakeholder_ids(db, doc, include_active_step=True) - {uid}
+        email_jobs = notify_users(
+            db, st, recipients, document_id=doc.id, kind="rejected",
+            title=f"Tài liệu bị từ chối: {doc.title}",
+            message=f"{_actor_label(actor)} đã từ chối ký tài liệu \"{doc.title}\": {body.reason}",
+            commit=False,
+        )
+        db.commit()
+        dispatch_emails(st, email_jobs)
+        return _document_detail(db, st, doc, actor)
+
+
+@router.post("/documents/{doc_id}/cancel")
+def cancel_document(
+    doc_id: str, request: Request, body: Optional[CancelIn] = None,
+    ctx: Ctx = Depends(require_mfa), db=Depends(get_db),
+):
+    st = request.app.state.settings
+    _validate_uuid(doc_id)
+    uid, ip = ctx.user.id, ctx.ip
+    reason = body.reason if body else ""
+
+    with _doc_lock(doc_id):
+        db.rollback()
+        actor = db.get(User, uid)
+        doc = db.scalar(select(Document).where(Document.id == doc_id).with_for_update())
+        if actor is None or doc is None or not _can_view_document(db, doc, actor):
+            raise HTTPException(404, "Không tìm thấy tài liệu")
+        if doc.creator_id != uid and actor.role != "admin":
+            raise HTTPException(403, "Chỉ người tạo tài liệu hoặc quản trị viên mới có thể hủy luồng")
+        if doc.status != "in_progress":
+            raise HTTPException(409, "Chỉ có thể hủy luồng đang ký")
+
+        now = utcnow()
+        cur_step = db.scalar(
+            select(WorkflowStep).where(WorkflowStep.document_id == doc.id, WorkflowStep.step_order == doc.current_step_order)
+        )
+        if cur_step is not None and cur_step.status == "active":
+            cur_step.status = "cancelled"
+            cur_step.completed_at = now
+            for a in db.scalars(select(StepAssignee).where(StepAssignee.step_id == cur_step.id, StepAssignee.status == "pending")):
+                a.status = "skipped"
+
+        doc.status = "cancelled"
+        doc.cancelled_at = now
+        doc.cancel_reason = reason or None
+        doc.updated_at = now
+
+        recipients = _stakeholder_ids(db, doc, include_all_assignees=True) - {uid}
+        audit(
+            db, ip, "doc_cancel", user=actor, document_id=doc.id, file_id=doc.current_file_id,
+            detail=reason or None, metadata={"reason": reason or None}, commit=False,
+        )
+        email_jobs = notify_users(
+            db, st, recipients, document_id=doc.id, kind="cancelled",
+            title=f"Luồng ký đã bị hủy: {doc.title}",
+            message=f"{_actor_label(actor)} đã hủy luồng ký \"{doc.title}\"" + (f": {reason}" if reason else "."),
+            commit=False,
+        )
+        db.commit()
+        dispatch_emails(st, email_jobs)
         return _document_detail(db, st, doc, actor)

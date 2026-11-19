@@ -57,6 +57,12 @@ class Settings:
     totp_issuer: str = "esign"
     signer_timeout: int = 120
     converter_timeout: int = 70
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_pass: str = ""
+    smtp_from: str = ""
+    smtp_tls: bool = True
 
     @property
     def upload_dir(self) -> str:
@@ -101,4 +107,10 @@ class Settings:
             admin_username=os.environ.get("ADMIN_USERNAME", ""),
             admin_password=read_secret("ADMIN_PASSWORD"),
             totp_issuer=os.environ.get("TOTP_ISSUER", "esign"),
+            smtp_host=os.environ.get("SMTP_HOST", "").strip(),
+            smtp_port=int(os.environ.get("SMTP_PORT", "587")),
+            smtp_user=os.environ.get("SMTP_USER", "").strip(),
+            smtp_pass=read_secret("SMTP_PASS"),
+            smtp_from=os.environ.get("SMTP_FROM", "").strip(),
+            smtp_tls=_bool("SMTP_TLS", True),
         )

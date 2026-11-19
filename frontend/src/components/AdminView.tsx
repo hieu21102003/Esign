@@ -5,6 +5,7 @@ interface AdminUser {
   id: number;
   username: string;
   display_name: string;
+  email: string | null;
   role: "admin" | "user";
   is_active: boolean;
   totp_enabled: boolean;
@@ -54,7 +55,10 @@ export function AdminView() {
   const [warnings, setWarnings] = useState<ExpiryItem[]>([]);
   const [username, setUsername] = useState("");
   const [displayName, setDisplayName] = useState("");
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [editEmailUid, setEditEmailUid] = useState<number | null>(null);
+  const [editEmailVal, setEditEmailVal] = useState("");
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
 
@@ -84,15 +88,38 @@ export function AdminView() {
     try {
       await apiJson("/api/admin/users", {
         method: "POST",
-        body: JSON.stringify({ username, display_name: displayName, password, role: "user" }),
+        body: JSON.stringify({
+          username,
+          display_name: displayName,
+          email: email.trim() || null,
+          password,
+          role: "user",
+        }),
       });
       setUsername("");
       setDisplayName("");
+      setEmail("");
       setPassword("");
       setMsg("Đã tạo người dùng mới");
       await loadAll();
     } catch (ex) {
       setErr(ex instanceof Error ? ex.message : "Lỗi tạo người dùng");
+    }
+  }
+
+  async function saveUserEmail(uid: number) {
+    setErr("");
+    setMsg("");
+    try {
+      await apiJson(`/api/admin/users/${uid}/email`, {
+        method: "PUT",
+        body: JSON.stringify({ email: editEmailVal.trim() || null }),
+      });
+      setEditEmailUid(null);
+      setMsg("Đã cập nhật email");
+      await loadAll();
+    } catch (ex) {
+      setErr(ex instanceof Error ? ex.message : "Lỗi cập nhật email");
     }
   }
 
@@ -127,23 +154,53 @@ export function AdminView() {
       <div className="card stack">
         <h3>Tạo người dùng</h3>
         <form onSubmit={handleCreateUser} className="row wrap">
-          <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="username" required />
-          <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="Tên hiển thị" />
-          <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Mật khẩu (>=10 ký tự)" required />
+          <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="username" required style={{ maxWidth: 160 }} />
+          <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="Tên hiển thị" style={{ maxWidth: 180 }} />
+          <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email (tùy chọn)" style={{ maxWidth: 210 }} />
+          <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Mật khẩu (>=10 ký tự)" required style={{ maxWidth: 200 }} />
           <button type="submit" className="btn primary small">Tạo user</button>
         </form>
         <table className="tbl">
           <thead>
-            <tr><th>User</th><th>Vai trò</th><th>2FA</th><th>Trạng thái</th><th>Thao tác</th></tr>
+            <tr><th>User</th><th>Email</th><th>Vai trò</th><th>2FA</th><th>Trạng thái</th><th>Thao tác</th></tr>
           </thead>
           <tbody>
             {users.map((u) => (
               <tr key={u.id}>
                 <td>{u.username}</td>
+                <td>
+                  {editEmailUid === u.id ? (
+                    <div className="row">
+                      <input
+                        type="email"
+                        value={editEmailVal}
+                        onChange={(e) => setEditEmailVal(e.target.value)}
+                        placeholder="email@domain"
+                        style={{ minWidth: 160 }}
+                      />
+                      <button type="button" className="btn tiny primary" onClick={() => saveUserEmail(u.id)}>Lưu</button>
+                      <button type="button" className="btn tiny" onClick={() => setEditEmailUid(null)}>Hủy</button>
+                    </div>
+                  ) : (
+                    <div className="row">
+                      <span>{u.email || "-"}</span>
+                      <button
+                        type="button"
+                        className="btn tiny"
+                        onClick={() => {
+                          setEditEmailUid(u.id);
+                          setEditEmailVal(u.email || "");
+                        }}
+                      >
+                        Sửa
+                      </button>
+                    </div>
+                  )}
+                </td>
                 <td>{u.role}</td>
                 <td>{u.totp_enabled ? "Bật" : "Chưa"}</td>
                 <td>{u.is_active ? (u.locked ? "Đang khóa" : "Hoạt động") : "Vô hiệu"}</td>
-                <td className="row">
+                <td className="row wrap">
                   {certs.map((c) => (
                     <button key={c.id} type="button" className="btn tiny" onClick={() => assignCert(u.id, c.id)}>
                       Gán {c.key_ref}

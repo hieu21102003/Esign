@@ -7,15 +7,18 @@ import io
 import os
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from pypdf import PdfReader, PdfWriter
 from sqlalchemy import select
 
-from conftest import ROOT, TEST_DATA, read
+from conftest import ROOT, TEST_DATA, build_env, read
 
 
 def _make_pdf(pages: int = 2) -> bytes:
@@ -346,26 +349,169 @@ def test_w2_concurrent_parallel_signing_preserves_both_signatures(env_light, mon
     assert rc.status_code == 200 and rc.json()["status"] == "completed"
 
 
-@pytest.mark.skipif(not os.environ.get("SIGNER_URL"), reason="Cần service signer thật trong Docker Compose")
-def test_w2_e2e_4_signers_real_pyhanko_and_concurrency(env):
+@contextmanager
+def _local_real_signer(tmp_path):
+    """Khởi chạy service signer/service.py + pyHanko thật tại local với bộ PKI 2 tầng + 4 chứng thư .p12 + CRL."""
+    from http.server import ThreadingHTTPServer
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.hazmat.primitives.serialization import pkcs12
+    from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID, ObjectIdentifier
+    import service as signer_svc
+
+    pki_dir = tmp_path / "local_pki"
+    issued = pki_dir / "issued"
+    pub = pki_dir / "public"
+    issued.mkdir(parents=True)
+    pub.mkdir(parents=True)
+
+    now = datetime.now(timezone.utc) - timedelta(minutes=5)
+    root_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    root_name = x509.Name([
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Demo Org"),
+        x509.NameAttribute(NameOID.COMMON_NAME, "Demo Org Root CA"),
+    ])
+    root_ski = x509.SubjectKeyIdentifier.from_public_key(root_key.public_key())
+    root_cert = (
+        x509.CertificateBuilder()
+        .subject_name(root_name).issuer_name(root_name).public_key(root_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now).not_valid_after(now + timedelta(days=3650))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .add_extension(x509.KeyUsage(
+            digital_signature=False, content_commitment=False, key_encipherment=False,
+            data_encipherment=False, key_agreement=False, key_cert_sign=True, crl_sign=True,
+            encipher_only=False, decipher_only=False,
+        ), critical=True)
+        .add_extension(root_ski, critical=False)
+        .sign(root_key, hashes.SHA256())
+    )
+
+    int_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    int_name = x509.Name([
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Demo Org"),
+        x509.NameAttribute(NameOID.COMMON_NAME, "Demo Org Intermediate CA"),
+    ])
+    int_ski = x509.SubjectKeyIdentifier.from_public_key(int_key.public_key())
+    int_cert = (
+        x509.CertificateBuilder()
+        .subject_name(int_name).issuer_name(root_name).public_key(int_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now).not_valid_after(now + timedelta(days=1825))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+        .add_extension(x509.KeyUsage(
+            digital_signature=False, content_commitment=False, key_encipherment=False,
+            data_encipherment=False, key_agreement=False, key_cert_sign=True, crl_sign=True,
+            encipher_only=False, decipher_only=False,
+        ), critical=True)
+        .add_extension(int_ski, critical=False)
+        .add_extension(x509.AuthorityKeyIdentifier.from_issuer_subject_key_identifier(root_ski), critical=False)
+        .add_extension(x509.CRLDistributionPoints([x509.DistributionPoint(
+            full_name=[x509.UniformResourceIdentifier("http://localhost/pki/root.crl")],
+            relative_name=None, reasons=None, crl_issuer=None,
+        )]), critical=False)
+        .sign(root_key, hashes.SHA256())
+    )
+
+    root_pem = root_cert.public_bytes(serialization.Encoding.PEM)
+    int_pem = int_cert.public_bytes(serialization.Encoding.PEM)
+    (pub / "root.crt").write_bytes(root_pem)
+    (pub / "int.crt").write_bytes(int_pem)
+    (pub / "chain.pem").write_bytes(int_pem + root_pem)
+
+    for ca_cert, ca_key, ca_ski, out_name in (
+        (root_cert, root_key, root_ski, "root.crl"),
+        (int_cert, int_key, int_ski, "int.crl"),
+    ):
+        crl = (
+            x509.CertificateRevocationListBuilder()
+            .issuer_name(ca_cert.subject)
+            .last_update(now).next_update(now + timedelta(days=30))
+            .add_extension(x509.CRLNumber(1), critical=False)
+            .add_extension(x509.AuthorityKeyIdentifier.from_issuer_subject_key_identifier(ca_ski), critical=False)
+            .sign(ca_key, hashes.SHA256())
+        )
+        (pub / out_name).write_bytes(crl.public_bytes(serialization.Encoding.DER))
+
+    for ref, cn in (("bob", "Trần Thị B"), ("carol", "Lê Văn C"), ("dave", "Phạm Thị D"), ("frank", "Đặng Thị F")):
+        k = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        sub = x509.Name([
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Demo Org"),
+            x509.NameAttribute(NameOID.COMMON_NAME, cn),
+        ])
+        c = (
+            x509.CertificateBuilder()
+            .subject_name(sub).issuer_name(int_name).public_key(k.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now).not_valid_after(now + timedelta(days=365))
+            .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+            .add_extension(x509.KeyUsage(
+                digital_signature=True, content_commitment=True, key_encipherment=False,
+                data_encipherment=False, key_agreement=False, key_cert_sign=False, crl_sign=False,
+                encipher_only=False, decipher_only=False,
+            ), critical=True)
+            .add_extension(x509.ExtendedKeyUsage([
+                ExtendedKeyUsageOID.EMAIL_PROTECTION, ObjectIdentifier("1.2.840.113583.1.1.5"),
+            ]), critical=False)
+            .add_extension(x509.SubjectKeyIdentifier.from_public_key(k.public_key()), critical=False)
+            .add_extension(x509.AuthorityKeyIdentifier.from_issuer_subject_key_identifier(int_ski), critical=False)
+            .add_extension(x509.CRLDistributionPoints([x509.DistributionPoint(
+                full_name=[x509.UniformResourceIdentifier("http://localhost/pki/int.crl")],
+                relative_name=None, reasons=None, crl_issuer=None,
+            )]), critical=False)
+            .sign(int_key, hashes.SHA256())
+        )
+        p12 = pkcs12.serialize_key_and_certificates(
+            cn.encode("utf-8"), k, c, [int_cert, root_cert], serialization.BestAvailableEncryption(b"userpw"),
+        )
+        (issued / f"{ref}.p12").write_bytes(p12)
+
+    old = (signer_svc.KEYS_DIR, signer_svc.PKI_PUBLIC, signer_svc.TSA_URL, signer_svc.SIGNER_TOKEN, signer_svc.P12_PASSPHRASE)
+    signer_svc.KEYS_DIR = str(issued)
+    signer_svc.PKI_PUBLIC = str(pub)
+    signer_svc.TSA_URL = None
+    signer_svc.SIGNER_TOKEN = "test-local-signer"
+    signer_svc.P12_PASSPHRASE = "userpw"
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), signer_svc.Handler)
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        yield f"http://127.0.0.1:{srv.server_address[1]}", "test-local-signer", str(pub)
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        signer_svc.KEYS_DIR, signer_svc.PKI_PUBLIC, signer_svc.TSA_URL, signer_svc.SIGNER_TOKEN, signer_svc.P12_PASSPHRASE = old
+
+
+def test_w2_e2e_4_signers_real_pyhanko_and_concurrency(tmp_path):
+    """Kiểm thử E2E 4 người ký bằng pyHanko thật (không skip cả khi chạy local lẫn trong Docker)."""
     from esign_core import make_vc, verify_pdf
 
-    pki_dir = os.environ.get("PKI_DIR", TEST_DATA)
-    frank_p12 = os.path.join(pki_dir, "issued", "frank.p12")
-    if not os.path.isfile(frank_p12) and os.environ.get("INT_PASS"):
-        p = subprocess.run(
-            ["bash", os.path.join(ROOT, "pki", "ca.sh"), "issue", "frank", "Đặng Thị F", "365"],
-            cwd=os.path.join(ROOT, "pki"), capture_output=True, text=True,
-        )
-        assert p.returncode == 0, p.stderr
-        try:
-            os.chown(frank_p12, 10002, 10002)
-        except PermissionError:
-            pass
+    if os.environ.get("SIGNER_URL"):
+        env = build_env(tmp_path, with_services=True)
+        pki_dir = os.environ.get("PKI_DIR", TEST_DATA)
+        frank_p12 = os.path.join(pki_dir, "issued", "frank.p12")
+        if not os.path.isfile(frank_p12) and os.environ.get("INT_PASS"):
+            p = subprocess.run(
+                ["bash", os.path.join(ROOT, "pki", "ca.sh"), "issue", "frank", "Đặng Thị F", "365"],
+                cwd=os.path.join(ROOT, "pki"), capture_output=True, text=True,
+            )
+            assert p.returncode == 0, p.stderr
+            try:
+                os.chown(frank_p12, 10002, 10002)
+            except PermissionError:
+                pass
+        _run_4_signer_real_pyhanko(env, os.path.join(pki_dir, "public"), level="B-T", verify_pdf=verify_pdf, make_vc=make_vc)
+    else:
+        with _local_real_signer(tmp_path) as (signer_url, tok, pub):
+            env = build_env(tmp_path / "app", with_services=False, signer_url=signer_url, signer_token=tok)
+            _run_4_signer_real_pyhanko(env, pub, level="B-B", verify_pdf=verify_pdf, make_vc=make_vc)
 
-    for kr in ("bob", "frank"):
-        if kr not in env.certs:
-            env.register_certs(kr)
+
+def _run_4_signer_real_pyhanko(env, pub_dir: str, *, level: str, verify_pdf, make_vc):
+    env.register_certs("bob", "carol", "dave", "frank")
 
     ua = env.make_user("wf_e2e_a", cert_keys=["bob"])
     ub = env.make_user("wf_e2e_b", cert_keys=["carol"])
@@ -386,7 +532,7 @@ def test_w2_e2e_4_signers_real_pyhanko_and_concurrency(env):
 
     # A ký bước 1 và assign cho B & C song song (all)
     r_a = ua.post(f"/api/documents/{doc_id}/sign", json=_sign_body(
-        env.certs["bob"], page=1, box=[30, 40, 260, 110], reason="A trình duyệt",
+        env.certs["bob"], page=1, box=[30, 40, 260, 110], reason="A trình duyệt", level=level,
         next_action="assign", next_assignee_ids=[ub.uid, uc.uid], next_mode="all",
     ))
     assert r_a.status_code == 200, r_a.text
@@ -402,10 +548,11 @@ def test_w2_e2e_4_signers_real_pyhanko_and_concurrency(env):
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         fb = pool.submit(_par_sign, ub_t, _sign_body(
-            env.certs["carol"], page=1, box=[310, 40, 550, 110], reason="B kiểm tra",
+            env.certs["carol"], page=1, box=[310, 40, 550, 110], reason="B kiểm tra", level=level,
         ))
         fc = pool.submit(_par_sign, uc_t, _sign_body(
-            env.certs["dave"], mode="both", image_id=img_id, page=2, box=[30, 40, 280, 120], reason="C đồng ý",
+            env.certs["dave"], mode="both", image_id=img_id, page=2, box=[30, 40, 280, 120],
+            reason="C đồng ý", level=level,
         ))
         rb, rc = fb.result(timeout=60), fc.result(timeout=60)
 
@@ -420,27 +567,33 @@ def test_w2_e2e_4_signers_real_pyhanko_and_concurrency(env):
 
     # D ký bước 3 và hoàn tất
     rd = ud.post(f"/api/documents/{doc_id}/sign", json=_sign_body(
-        env.certs["frank"], page=-1, box=[310, 40, 550, 110], reason="D ký ban hành", next_action="complete",
+        env.certs["frank"], page=-1, box=[310, 40, 550, 110], reason="D ký ban hành",
+        level=level, next_action="complete",
     ))
     assert rd.status_code == 200, rd.text
     assert rd.json()["document"]["status"] == "completed"
 
-    # Kiểm chứng 4 chữ ký hợp lệ qua API, pyHanko trực tiếp và pdfsig
+    # Kiểm chứng 4 chữ ký hợp lệ qua API, pyHanko trực tiếp (cho cả các phiên bản trung gian) và pdfsig
     v_api = ua.post(f"/api/documents/{doc_id}/verify")
     assert v_api.status_code == 200, v_api.text
     assert v_api.json()["all_ok"] is True and len(v_api.json()["signatures"]) == 4
 
-    final_pdf = ua.get(f"/api/documents/{doc_id}/file").content
-    pub = os.path.join(pki_dir, "public")
-    vc = make_vc(os.path.join(pub, "root.crt"), os.path.join(pub, "chain.pem"),
-                 [os.path.join(pub, "int.crl"), os.path.join(pub, "root.crl")], revocation="require")
-    import tempfile
+    vc = make_vc(os.path.join(pub_dir, "root.crt"), os.path.join(pub_dir, "chain.pem"),
+                 [os.path.join(pub_dir, "int.crl"), os.path.join(pub_dir, "root.crl")], revocation="require")
     with tempfile.TemporaryDirectory() as td:
-        p = os.path.join(td, "final.pdf")
-        open(p, "wb").write(final_pdf)
-        sigs = verify_pdf(p, vc)
-        assert len(sigs) == 4
-        assert all(s["ok"] and s["intact"] and s["valid"] and s["trusted"] and not s["revoked"] for s in sigs)
+        for vno in range(5):
+            vp = os.path.join(td, f"v{vno}.pdf")
+            v_bytes = ua.get(f"/api/documents/{doc_id}/versions/{vno}/file").content
+            open(vp, "wb").write(v_bytes)
+            vsigs = verify_pdf(vp, vc)
+            assert len(vsigs) == vno
+            assert all(s["ok"] and s["intact"] and s["valid"] and s["trusted"] and not s["revoked"] for s in vsigs)
+
+        final_path = os.path.join(td, "v4.pdf")
+        final_sigs = verify_pdf(final_path, vc)
+        signers_text = " | ".join(s["signer"] for s in final_sigs)
+        for expected_name in ("Trần Thị B", "Lê Văn C", "Phạm Thị D", "Đặng Thị F"):
+            assert expected_name in signers_text
         if shutil.which("pdfsig"):
-            ps = subprocess.run(["pdfsig", "-nocert", p], capture_output=True, text=True).stdout
+            ps = subprocess.run(["pdfsig", "-nocert", final_path], capture_output=True, text=True).stdout
             assert ps.count("Signature is Valid") == 4
