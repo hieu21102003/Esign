@@ -11,7 +11,23 @@ from sqlalchemy import delete, desc, select
 
 from .audit import audit
 from .deps import Ctx, get_db, require_admin
-from .models import AuditLog, Certificate, RecoveryCode, SessionRow, User, UserCertificate, utcnow
+from .models import (
+    AuditLog,
+    Certificate,
+    Document,
+    DocumentVersion,
+    Notification,
+    RecoveryCode,
+    SessionRow,
+    SignaturePreset,
+    SignJob,
+    StepAssignee,
+    StoredFile,
+    User,
+    UserCertificate,
+    WorkflowStep,
+    utcnow,
+)
 from .security import check_password_policy, hash_password
 from .services import ca_health, ca_issue, ca_revoke, signer_certs, signer_status
 
@@ -213,6 +229,42 @@ def reset_2fa(uid: int, ctx: Ctx = Depends(require_admin), db=Depends(get_db)):
     db.commit()
     audit(db, ctx.ip, "user_reset_2fa", user=ctx.user, detail=f"target={u.username}")
     return _user_out(u)
+
+
+@router.delete("/users/{uid}")
+def delete_user(uid: int, ctx: Ctx = Depends(require_admin), db=Depends(get_db)):
+    """Xóa vĩnh viễn user chưa phát sinh tài liệu/lịch sử ký; chặn nếu đã có lịch sử truy vết."""
+    u = _get_user(db, uid)
+    if u.id == ctx.user.id:
+        raise HTTPException(400, "Không thể tự xóa tài khoản của chính mình")
+
+    has_history = any(
+        db.scalar(q) is not None
+        for q in (
+            select(StoredFile.id).where(StoredFile.owner_id == u.id).limit(1),
+            select(SignJob.id).where(SignJob.user_id == u.id).limit(1),
+            select(Document.id).where(Document.creator_id == u.id).limit(1),
+            select(WorkflowStep.id).where(WorkflowStep.assigned_by_id == u.id).limit(1),
+            select(StepAssignee.id).where(StepAssignee.user_id == u.id).limit(1),
+            select(DocumentVersion.id).where(DocumentVersion.created_by_id == u.id).limit(1),
+        )
+    )
+    if has_history:
+        raise HTTPException(
+            409,
+            "Không thể xóa vĩnh viễn user đã có tài liệu hoặc lịch sử ký; hãy dùng 'Vô hiệu hóa' để khóa đăng nhập và giữ nguyên lịch sử truy vết",
+        )
+
+    uname = u.username
+    db.execute(delete(SessionRow).where(SessionRow.user_id == u.id))
+    db.execute(delete(RecoveryCode).where(RecoveryCode.user_id == u.id))
+    db.execute(delete(UserCertificate).where(UserCertificate.user_id == u.id))
+    db.execute(delete(SignaturePreset).where(SignaturePreset.user_id == u.id))
+    db.execute(delete(Notification).where(Notification.user_id == u.id))
+    db.delete(u)
+    audit(db, ctx.ip, "user_delete", user=ctx.user, detail=f"target={uname}", commit=False)
+    db.commit()
+    return {"ok": True, "deleted_id": uid, "username": uname}
 
 
 def _cert_out(c: Certificate) -> dict:

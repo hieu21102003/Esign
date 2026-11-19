@@ -158,7 +158,7 @@ export function App() {
           />
         )}
         {tab === "verify" && <VerifyView initialFileId={verifyFileId} />}
-        {tab === "admin" && me.role === "admin" && <AdminView />}
+        {tab === "admin" && me.role === "admin" && <AdminView currentUserId={me.id} />}
       </main>
     </div>
   );

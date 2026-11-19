@@ -48,7 +48,7 @@ interface ExpiryItem {
   status: string;
 }
 
-export function AdminView() {
+export function AdminView({ currentUserId }: { currentUserId?: number } = {}) {
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [certs, setCerts] = useState<AdminCert[]>([]);
   const [avail, setAvail] = useState<AvailCert[]>([]);
@@ -162,6 +162,81 @@ export function AdminView() {
       await loadAll();
     } catch (ex) {
       setErr(ex instanceof Error ? ex.message : "Thu hồi chứng thư thất bại");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deactivateCert(c: AdminCert) {
+    if (!window.confirm(`Vô hiệu hóa chứng thư "${c.key_ref}" (${c.subject}) trong ứng dụng?`)) return;
+    setErr("");
+    setMsg("");
+    setBusy(true);
+    try {
+      await apiJson(`/api/admin/certificates/${c.id}/deactivate`, { method: "POST" });
+      setMsg(`Đã vô hiệu hóa chứng thư "${c.key_ref}" trong ứng dụng`);
+      await loadAll();
+    } catch (ex) {
+      setErr(ex instanceof Error ? ex.message : "Vô hiệu hóa chứng thư thất bại");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function toggleUserActive(u: AdminUser, active: boolean) {
+    if (
+      !active &&
+      !window.confirm(
+        `Vô hiệu hóa tài khoản "${u.username}"? Người dùng này sẽ bị đăng xuất và không thể đăng nhập hay được assign mới.`,
+      )
+    ) {
+      return;
+    }
+    setErr("");
+    setMsg("");
+    setBusy(true);
+    try {
+      await apiJson(`/api/admin/users/${u.id}/${active ? "enable" : "disable"}`, { method: "POST" });
+      setMsg(active ? `Đã kích hoạt lại tài khoản "${u.username}"` : `Đã vô hiệu hóa tài khoản "${u.username}"`);
+      await loadAll();
+    } catch (ex) {
+      setErr(ex instanceof Error ? ex.message : "Cập nhật trạng thái user thất bại");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function resetUser2fa(u: AdminUser) {
+    if (!window.confirm(`Reset 2FA cho "${u.username}"? Người dùng sẽ phải quét mã QR 2FA mới ở lần đăng nhập sau.`)) return;
+    setErr("");
+    setMsg("");
+    setBusy(true);
+    try {
+      await apiJson(`/api/admin/users/${u.id}/reset-2fa`, { method: "POST" });
+      setMsg(`Đã reset 2FA cho "${u.username}"`);
+      await loadAll();
+    } catch (ex) {
+      setErr(ex instanceof Error ? ex.message : "Reset 2FA thất bại");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deleteUser(u: AdminUser) {
+    const extra =
+      u.cert_refs && u.cert_refs.length > 0
+        ? ` Chứng thư (${u.cert_refs.join(", ")}) chỉ được gỡ khỏi user; nếu muốn hủy hiệu lực trên CRL hãy bấm "Thu hồi CA (Revoke)" ở bảng Chứng thư.`
+        : "";
+    if (!window.confirm(`Xóa vĩnh viễn user "${u.username}"?${extra}`)) return;
+    setErr("");
+    setMsg("");
+    setBusy(true);
+    try {
+      await apiJson(`/api/admin/users/${u.id}`, { method: "DELETE" });
+      setMsg(`Đã xóa user "${u.username}"`);
+      await loadAll();
+    } catch (ex) {
+      setErr(ex instanceof Error ? ex.message : "Xóa user thất bại");
     } finally {
       setBusy(false);
     }
@@ -326,6 +401,51 @@ export function AdminView() {
                       Mở khóa
                     </button>
                   )}
+                  {u.id !== currentUserId && (
+                    <>
+                      {u.is_active ? (
+                        <button
+                          type="button"
+                          className="btn tiny"
+                          disabled={busy}
+                          onClick={() => toggleUserActive(u, false)}
+                          data-testid={`admin-disable-user-${u.username}`}
+                        >
+                          Vô hiệu hóa
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          className="btn tiny primary"
+                          disabled={busy}
+                          onClick={() => toggleUserActive(u, true)}
+                          data-testid={`admin-enable-user-${u.username}`}
+                        >
+                          Kích hoạt
+                        </button>
+                      )}
+                      {u.totp_enabled && (
+                        <button
+                          type="button"
+                          className="btn tiny"
+                          disabled={busy}
+                          onClick={() => resetUser2fa(u)}
+                          data-testid={`admin-reset2fa-user-${u.username}`}
+                        >
+                          Reset 2FA
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="btn tiny danger"
+                        disabled={busy}
+                        onClick={() => deleteUser(u)}
+                        data-testid={`admin-delete-user-${u.username}`}
+                      >
+                        Xóa user
+                      </button>
+                    </>
+                  )}
                 </td>
               </tr>
             ))}
@@ -335,7 +455,14 @@ export function AdminView() {
 
       <div className="card stack">
         <h3>Chứng thư đã đăng ký ({certs.length})</h3>
-        {certs.length > 0 && (
+        {(!caEnabled || !caHealthy) && (
+          <div className="muted">
+            Lưu ý: nút "Thu hồi CA (Revoke)" cần service <code>ca</code> nội bộ đang chạy để cập nhật CRL; nút "Vô hiệu hóa" chặn sử dụng chứng thư ngay trong ứng dụng.
+          </div>
+        )}
+        {certs.length === 0 ? (
+          <div className="muted">Chưa có chứng thư nào được đăng ký.</div>
+        ) : (
           <table className="tbl">
             <thead>
               <tr><th>key_ref</th><th>Chủ thể (CN)</th><th>Serial</th><th>Hết hạn</th><th>Trạng thái</th><th>Thao tác</th></tr>
@@ -352,17 +479,32 @@ export function AdminView() {
                       {c.active ? "Hoạt động" : "Đã thu hồi / vô hiệu"}
                     </span>
                   </td>
-                  <td>
-                    {caEnabled && c.active && (
-                      <button
-                        type="button"
-                        className="btn tiny danger"
-                        disabled={busy}
-                        onClick={() => revokeCert(c)}
-                        data-testid={`admin-revoke-cert-${c.key_ref}`}
-                      >
-                        Thu hồi (Revoke)
-                      </button>
+                  <td className="row wrap">
+                    {c.active ? (
+                      <>
+                        <button
+                          type="button"
+                          className="btn tiny danger"
+                          disabled={busy || !caEnabled || !caHealthy}
+                          title={!caEnabled || !caHealthy ? "Cần bật service ca nội bộ để thu hồi trên CRL" : "Thu hồi vĩnh viễn chứng thư trên CA và cập nhật CRL"}
+                          onClick={() => revokeCert(c)}
+                          data-testid={`admin-revoke-cert-${c.key_ref}`}
+                        >
+                          Thu hồi CA (Revoke)
+                        </button>
+                        <button
+                          type="button"
+                          className="btn tiny"
+                          disabled={busy}
+                          title="Ngừng cho phép ký bằng chứng thư này trong ứng dụng"
+                          onClick={() => deactivateCert(c)}
+                          data-testid={`admin-deactivate-cert-${c.key_ref}`}
+                        >
+                          Vô hiệu hóa
+                        </button>
+                      </>
+                    ) : (
+                      <span className="muted">-</span>
                     )}
                   </td>
                 </tr>

@@ -162,6 +162,91 @@ def test_admin_auto_issue_on_user_create_and_existing_user_and_revoke(tmp_path, 
     assert "cert_issue" in acts and "cert_assign" in acts and "cert_revoke" in acts
 
 
+def test_admin_delete_user_and_lifecycle_controls(tmp_path, monkeypatch):
+    import app.routes_admin as ra
+
+    monkeypatch.setattr(ra, "ca_health", lambda st: True)
+    monkeypatch.setattr(
+        ra,
+        "ca_issue",
+        lambda st, key_ref, cn, days=365: {
+            "key_ref": key_ref,
+            "subject": cn,
+            "serial": "bb0001",
+            "not_after": "2028-01-01T00:00:00+00:00",
+        },
+    )
+
+    env = build_env(tmp_path, with_services=False, ca_url="http://ca:9001", ca_token="tok")
+    admin_row = next(u for u in env.admin.get("/api/admin/users").json() if u["username"] == "admin")
+
+    # Tạo clean_user kèm cấp cert và enroll 2FA (tạo session + recovery codes)
+    r_clean = env.admin.post(
+        "/api/admin/users",
+        json={
+            "username": "clean_user",
+            "password": USER_PASS,
+            "display_name": "Clean User",
+            "issue_cert": True,
+            "cert_days": 365,
+        },
+    )
+    assert r_clean.status_code == 201, r_clean.text
+    clean_uid = r_clean.json()["id"]
+    clean_cert_id = r_clean.json()["certificate"]["id"]
+    u_clean = env.enroll("clean_user", USER_PASS)
+
+    # Tạo history_user và upload 1 PDF để phát sinh dữ liệu lịch sử
+    r_hist = env.admin.post(
+        "/api/admin/users",
+        json={"username": "history_user", "password": USER_PASS, "display_name": "History User"},
+    )
+    assert r_hist.status_code == 201, r_hist.text
+    hist_uid = r_hist.json()["id"]
+    u_hist = env.enroll("history_user", USER_PASS)
+    r_up = u_hist.post("/api/files", files={"file": ("doc.pdf", _make_pdf(), "application/pdf")})
+    assert r_up.status_code in (200, 201), r_up.text
+
+    # Phân quyền & kiểm tra biên: user thường bị 403, tự xóa bị 400, không tồn tại bị 404
+    assert u_clean.delete(f"/api/admin/users/{hist_uid}").status_code == 403
+    assert env.admin.delete(f"/api/admin/users/{admin_row['id']}").status_code == 400
+    assert env.admin.delete("/api/admin/users/999999").status_code == 404
+
+    # Xóa user sạch thành công -> session bị hủy, biến mất khỏi danh sách, ghi audit user_delete
+    r_del = env.admin.delete(f"/api/admin/users/{clean_uid}")
+    assert r_del.status_code == 200, r_del.text
+    assert r_del.json()["deleted_id"] == clean_uid
+    assert all(u["id"] != clean_uid for u in env.admin.get("/api/admin/users").json())
+    assert u_clean.get("/api/auth/me").status_code == 401
+
+    # Chứng thư đã gán trước đó vẫn có thể vô hiệu hóa độc lập trong ứng dụng (hoặc thu hồi CA)
+    r_deact = env.admin.post(f"/api/admin/certificates/{clean_cert_id}/deactivate")
+    assert r_deact.status_code == 200 and r_deact.json()["active"] is False
+
+    # User đã có file/lịch sử -> chặn xóa vĩnh viễn với 409, chuyển sang Vô hiệu hóa / Kích hoạt / Reset 2FA
+    r_del_hist = env.admin.delete(f"/api/admin/users/{hist_uid}")
+    assert r_del_hist.status_code == 409
+    assert any(u["id"] == hist_uid for u in env.admin.get("/api/admin/users").json())
+
+    r_dis = env.admin.post(f"/api/admin/users/{hist_uid}/disable")
+    assert r_dis.status_code == 200 and r_dis.json()["is_active"] is False
+    assert u_hist.get("/api/auth/me").status_code == 401
+    assignable_dis = {x["username"] for x in env.admin.get("/api/users/assignable").json()}
+    assert "history_user" not in assignable_dis
+
+    r_en = env.admin.post(f"/api/admin/users/{hist_uid}/enable")
+    assert r_en.status_code == 200 and r_en.json()["is_active"] is True
+    assignable_en = {x["username"] for x in env.admin.get("/api/users/assignable").json()}
+    assert "history_user" in assignable_en
+
+    r_r2fa = env.admin.post(f"/api/admin/users/{hist_uid}/reset-2fa")
+    assert r_r2fa.status_code == 200 and r_r2fa.json()["totp_enabled"] is False
+
+    audits = env.admin.get("/api/admin/audit?limit=50").json()
+    assert any(a["action"] == "user_delete" and a["detail"] == "target=clean_user" for a in audits)
+    assert any(a["action"] == "cert_deactivate" for a in audits)
+
+
 @pytest.mark.skipif(
     not (os.environ.get("CA_URL") and os.environ.get("SIGNER_URL")),
     reason="Cần service `ca` và `signer` thật trong Docker Compose",
