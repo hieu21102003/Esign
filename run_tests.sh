@@ -77,7 +77,12 @@ chk "M3: End-to-end .docx -> PDF -> ký số -> verify (pyHanko & pdfsig)" "sign
 if [ -n "${SIGNER_URL:-}" ] && [ -n "${CONVERTER_URL:-}" ]; then
   echo "== M4 + M5 + M6: Backend, Frontend Playwright, Caddy HTTPS, CRL & Backup =="
   ( cd "$HERE/pki" && ./ca.sh issue carol "Lê Văn C" 365 && ./ca.sh issue dave "Phạm Thị D" 365 && ./ca.sh issue erin "Hoàng Văn E" 365 && ./ca.sh issue frank "Đặng Thị F" 365 && ./ca.sh server test_srv caddy localhost 127.0.0.1 && ROOT_PASS="" ./ca.sh crl-int ) >/dev/null 2>&1
-  chown 10002:10002 "$D"/issued/*.p12 2>/dev/null || true
+  chown 10005:10002 "$D/issued" 2>/dev/null || true
+  chmod 750 "$D/issued" 2>/dev/null || true
+  chown 10005:10002 "$D"/issued/*.p12 2>/dev/null || true
+  chmod 640 "$D"/issued/*.p12 2>/dev/null || true
+  chown -R 10005:10005 "$D/int" 2>/dev/null || true
+  chown -R 10005:10002 "$D/public" 2>/dev/null || true
   chown -R 10003:10003 "$D/tsa" 2>/dev/null || true
   if pytest -q "$HERE/backend/tests" --tb=short >/tmp/pytest_m46.log 2>&1; then
     ok "M4+M5+M6: Bộ test API, Playwright E2E, Tọa độ <3pt, Caddy, CRL, Backup (pytest)"

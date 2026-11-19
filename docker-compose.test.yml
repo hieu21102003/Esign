@@ -32,7 +32,10 @@ services:
         ./ca.sh init >/dev/null
         ./ca.sh server server caddy localhost 127.0.0.1 >/dev/null
         chown -R 10003:10003 /workspace/test-data/tsa
-        chmod 755 /workspace/test-data/issued /workspace/test-data/public /workspace/test-data/server
+        chown -R 10005:10005 /workspace/test-data/int
+        chown -R 10005:10002 /workspace/test-data/issued /workspace/test-data/public
+        chmod 750 /workspace/test-data/issued
+        chmod 755 /workspace/test-data/public /workspace/test-data/server
 
   db:
     image: postgres:16-alpine
@@ -122,6 +125,36 @@ services:
       timeout: 3s
       retries: 20
 
+  ca:
+    build: {context: ., dockerfile: ca/Dockerfile}
+    image: esign-ca:latest
+    restart: "no"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    user: "10005:10002"
+    tmpfs: ["/tmp:rw,nosuid,nodev,size=32m"]
+    mem_limit: 256m
+    environment:
+      CA_TOKEN: test-ca-token-local
+      INT_PASS: intpw
+      P12_PASSPHRASE: userpw
+      PKI_DIR: /pki
+      ORG: "Demo Org"
+      CRL_BASE: "http://caddy/pki"
+    volumes:
+      - ./test-data/int:/pki/int
+      - ./test-data/issued:/pki/issued
+      - ./test-data/public:/pki/public
+    networks: [internal]
+    depends_on:
+      pki-init: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:9001/health',timeout=3)"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
   api:
     build: {context: ., dockerfile: backend/Dockerfile}
     image: esign-api:latest
@@ -145,6 +178,8 @@ services:
       CONVERTER_URL: http://converter:8001
       SIGNER_URL: http://signer:9000
       SIGNER_TOKEN: test-signer-token-local
+      CA_URL: http://ca:9001
+      CA_TOKEN: test-ca-token-local
       ADMIN_USERNAME: admin
       ADMIN_PASSWORD: Adm1n-Pass-Strong
       COOKIE_SECURE: "false"
@@ -156,6 +191,7 @@ services:
       db: {condition: service_healthy}
       converter: {condition: service_healthy}
       signer: {condition: service_healthy}
+      ca: {condition: service_healthy}
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/api/health',timeout=3)"]
       interval: 3s
@@ -213,6 +249,8 @@ services:
       CONVERTER_URL: http://converter:8001
       SIGNER_URL: http://signer:9000
       SIGNER_TOKEN: test-signer-token-local
+      CA_URL: http://ca:9001
+      CA_TOKEN: test-ca-token-local
       API_LIVE_URL: http://api:8000
       WEB_LIVE_URL: http://web:8080
       CADDY_HTTPS_URL: https://caddy
@@ -224,8 +262,10 @@ services:
       db: {condition: service_healthy}
       converter: {condition: service_healthy}
       signer: {condition: service_healthy}
+      ca: {condition: service_healthy}
       api: {condition: service_healthy}
       web: {condition: service_healthy}
       caddy: {condition: service_healthy}
       tsa: {condition: service_healthy}
+      ca: {condition: service_healthy}
     command: ["bash", "./run_tests.sh"]

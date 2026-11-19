@@ -204,5 +204,44 @@ def signer_verify(settings, pdf: bytes) -> list:
     return r.json().get("signatures", [])
 
 
+def ca_health(settings) -> bool:
+    url = (getattr(settings, "ca_url", "") or "").rstrip("/")
+    if not url:
+        return False
+    try:
+        r = httpx.get(url + "/health", timeout=5)
+        return r.status_code == 200
+    except httpx.HTTPError:
+        return False
+
+
+def _ca_post(settings, path: str, payload: dict) -> dict:
+    url = (getattr(settings, "ca_url", "") or "").rstrip("/")
+    if not url:
+        raise HTTPException(503, "Dịch vụ cấp chứng thư tự động (CA) chưa được cấu hình")
+    try:
+        r = httpx.post(
+            url + path,
+            json=payload,
+            headers={"X-CA-Token": getattr(settings, "ca_token", "")},
+            timeout=getattr(settings, "ca_timeout", 30),
+        )
+    except httpx.HTTPError:
+        raise HTTPException(503, "Dịch vụ CA nội bộ không khả dụng")
+    if r.status_code in (400, 404, 409):
+        raise HTTPException(r.status_code, _detail(r) or "Yêu cầu tới CA bị từ chối")
+    if r.status_code not in (200, 201):
+        raise HTTPException(502, _detail(r) or "Dịch vụ CA trả lỗi")
+    return r.json()
+
+
+def ca_issue(settings, key_ref: str, common_name: str, days: int = 365) -> dict:
+    return _ca_post(settings, "/issue", {"key_ref": key_ref, "common_name": common_name, "days": days})
+
+
+def ca_revoke(settings, key_ref: str) -> dict:
+    return _ca_post(settings, "/revoke", {"key_ref": key_ref})
+
+
 def b64(data: Optional[bytes]) -> Optional[str]:
     return base64.b64encode(data).decode() if data else None

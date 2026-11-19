@@ -62,9 +62,11 @@ read -s -p "USER_PASS (.p12 passphrase): " USER_PASS; echo; export USER_PASS
 ./pki/ca.sh issue alice "Nguyễn Văn A" 365
 ./pki/ca.sh issue bob   "Trần Thị B" 365
 
-# Phân quyền chặt cho các container non-root
-sudo chown -R 10002:10002 /opt/esign/pki-data/issued
-sudo chmod 600 /opt/esign/pki-data/issued/*.p12
+# Phân quyền chặt cho các container non-root (`ca` UID 10005:10002, `signer` GID 10002, `tsa` UID 10003)
+sudo chown -R 10005:10005 /opt/esign/pki-data/int
+sudo chown -R 10005:10002 /opt/esign/pki-data/issued /opt/esign/pki-data/public
+sudo chmod 750 /opt/esign/pki-data/issued
+sudo chmod 640 /opt/esign/pki-data/issued/*.p12
 sudo chown -R 10003:10003 /opt/esign/pki-data/tsa
 sudo chmod 600 /opt/esign/pki-data/tsa/tsa.key
 ```
@@ -77,10 +79,12 @@ sudo chmod 600 /opt/esign/pki-data/tsa/tsa.key
 cd /opt/esign
 umask 077
 python3 -c "import secrets; print(secrets.token_urlsafe(48), end='')" > secrets/signer_token
+python3 -c "import secrets; print(secrets.token_urlsafe(48), end='')" > secrets/ca_token
 python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode(), end='')" > secrets/totp_enc_key
 python3 -c "import secrets; print(secrets.token_urlsafe(24), end='')" > secrets/db_password
 printf '%s' "$USER_PASS" > secrets/p12_passphrase
-unset USER_PASS
+printf '%s' "$INT_PASS" > secrets/int_passphrase
+unset USER_PASS INT_PASS
 
 # Bắt buộc tự đặt mật khẩu admin (>= 10 ký tự, có chữ hoa, chữ thường, chữ số):
 read -s -p "ADMIN_PASSWORD: " APW; echo
@@ -90,11 +94,14 @@ unset APW
 chmod 700 secrets
 chmod 400 secrets/*
 
-# Phân quyền đúng theo UID từng container (signer=10002, api=10004, postgres=70):
-sudo chown 10002:10002 secrets/p12_passphrase
+# Phân quyền đúng theo UID từng container (ca=10005, signer=10002, api=10004, postgres=70):
+sudo chown 10005:10005 secrets/int_passphrase
 sudo chown 10004:10004 secrets/totp_enc_key secrets/admin_password
-sudo chown root:root secrets/signer_token secrets/db_password
+sudo chown root:root secrets/signer_token secrets/ca_token secrets/p12_passphrase secrets/db_password
+sudo setfacl -m u:10002:r secrets/p12_passphrase
+sudo setfacl -m u:10005:r secrets/p12_passphrase
 sudo setfacl -m u:10002:r,u:10004:r secrets/signer_token
+sudo setfacl -m u:10005:r,u:10004:r secrets/ca_token
 sudo setfacl -m u:70:r,u:10004:r secrets/db_password
 
 cp .env.example .env

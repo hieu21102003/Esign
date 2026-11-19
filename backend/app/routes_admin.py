@@ -13,7 +13,7 @@ from .audit import audit
 from .deps import Ctx, get_db, require_admin
 from .models import AuditLog, Certificate, RecoveryCode, SessionRow, User, UserCertificate, utcnow
 from .security import check_password_policy, hash_password
-from .services import signer_certs, signer_status
+from .services import ca_health, ca_issue, ca_revoke, signer_certs, signer_status
 
 log = logging.getLogger("esign.pki")
 
@@ -21,6 +21,28 @@ router = APIRouter(prefix="/api/admin", tags=["admin"])
 USERNAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,63}$")
 KEY_REF_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_BAD_CN_RE = re.compile(r"[/\\+\x00-\x1f\x7f]")
+
+
+def _clean_cn(raw: str) -> str:
+    s = (raw or "").strip()
+    if not s or len(s) > 120 or _BAD_CN_RE.search(s):
+        raise HTTPException(400, "Tên hiển thị trên chứng thư không hợp lệ (không rỗng, không chứa / \\ +)")
+    return s
+
+
+def _next_key_ref(db, base: str) -> str:
+    norm = re.sub(r"[^A-Za-z0-9_-]+", "_", (base or "").strip().lower()).strip("_")
+    if len(norm) < 2:
+        norm = f"u_{norm or 'signer'}"
+    norm = norm[:56]
+    used = set(db.scalars(select(Certificate.key_ref)))
+    if norm not in used:
+        return norm
+    n = 2
+    while f"{norm}-{n}" in used:
+        n += 1
+    return f"{norm}-{n}"
 
 
 def _clean_email(v: Optional[str]) -> Optional[str]:
@@ -38,6 +60,14 @@ class UserIn(BaseModel):
     display_name: str = Field("", max_length=120)
     email: Optional[str] = Field(None, max_length=255)
     role: Literal["admin", "user"] = "user"
+    issue_cert: bool = False
+    cert_days: int = Field(365, ge=1, le=1825)
+
+
+class IssueUserCertIn(BaseModel):
+    common_name: Optional[str] = Field(None, max_length=120)
+    key_ref: Optional[str] = Field(None, max_length=64)
+    days: int = Field(365, ge=1, le=1825)
 
 
 class EmailIn(BaseModel):
@@ -52,10 +82,12 @@ class AssignIn(BaseModel):
     cert_ids: List[int] = Field(max_length=200)
 
 
-def _user_out(u: User) -> dict:
+def _user_out(u: User, cert_refs: Optional[List[str]] = None) -> dict:
     return {"id": u.id, "username": u.username, "display_name": u.display_name, "email": u.email, "role": u.role,
             "is_active": u.is_active, "totp_enabled": u.totp_enabled,
-            "locked": bool(u.locked_until and u.locked_until > utcnow()), "created_at": u.created_at.isoformat()}
+            "locked": bool(u.locked_until and u.locked_until > utcnow()),
+            "created_at": u.created_at.isoformat(),
+            "cert_refs": cert_refs if cert_refs is not None else []}
 
 
 def _get_user(db, uid: int) -> User:
@@ -76,17 +108,59 @@ def create_user(body: UserIn, request: Request, ctx: Ctx = Depends(require_admin
         raise HTTPException(400, err)
     if db.scalar(select(User).where(User.username == username)):
         raise HTTPException(409, "Username đã tồn tại")
-    u = User(username=username, display_name=body.display_name.strip(), email=_clean_email(body.email),
+    email = _clean_email(body.email)
+    display_name = body.display_name.strip()
+
+    issued_cert = None
+    key_ref = None
+    if body.issue_cert:
+        cn = _clean_cn(display_name or username)
+        key_ref = _next_key_ref(db, username)
+        issued_cert = ca_issue(st, key_ref, cn, body.cert_days)
+
+    u = User(username=username, display_name=display_name, email=email,
              password_hash=hash_password(body.password), role=body.role)
     db.add(u)
+    db.flush()
+
+    cert_row = None
+    if issued_cert is not None and key_ref is not None:
+        cert_row = Certificate(
+            key_ref=key_ref,
+            subject=issued_cert["subject"][:255],
+            serial=issued_cert["serial"],
+            not_after=issued_cert["not_after"],
+        )
+        db.add(cert_row)
+        db.flush()
+        db.add(UserCertificate(user_id=u.id, cert_id=cert_row.id))
+
+    audit(db, ctx.ip, "user_create", user=ctx.user, detail=f"target={username} role={u.role}", commit=False)
+    if cert_row is not None:
+        audit(db, ctx.ip, "cert_issue", user=ctx.user, cert_key_ref=cert_row.key_ref,
+              detail=f"target={username} days={body.cert_days}", commit=False)
+        audit(db, ctx.ip, "cert_assign", user=ctx.user,
+              detail=f"target={username} certs={[cert_row.id]}", commit=False)
     db.commit()
-    audit(db, ctx.ip, "user_create", user=ctx.user, detail=f"target={username} role={u.role}")
-    return _user_out(u)
+
+    out = _user_out(u, [cert_row.key_ref] if cert_row is not None else [])
+    if cert_row is not None:
+        out["certificate"] = _cert_out(cert_row)
+    return out
 
 
 @router.get("/users")
 def list_users(ctx: Ctx = Depends(require_admin), db=Depends(get_db)):
-    return [_user_out(u) for u in db.scalars(select(User).order_by(User.id))]
+    users = list(db.scalars(select(User).order_by(User.id)))
+    refs_by_uid: dict[int, List[str]] = {}
+    for uid, kref in db.execute(
+        select(UserCertificate.user_id, Certificate.key_ref)
+        .join(Certificate, Certificate.id == UserCertificate.cert_id)
+        .where(Certificate.active.is_(True))
+        .order_by(Certificate.id)
+    ):
+        refs_by_uid.setdefault(uid, []).append(kref)
+    return [_user_out(u, refs_by_uid.get(u.id, [])) for u in users]
 
 
 def _set_active(uid: int, active: bool, ctx: Ctx, db) -> dict:
@@ -176,6 +250,47 @@ def list_certs(ctx: Ctx = Depends(require_admin), db=Depends(get_db)):
     return [_cert_out(c) for c in db.scalars(select(Certificate).order_by(Certificate.id))]
 
 
+@router.get("/ca/status")
+def get_ca_status(request: Request, ctx: Ctx = Depends(require_admin)):
+    st = request.app.state.settings
+    enabled = bool((getattr(st, "ca_url", "") or "").strip())
+    return {"enabled": enabled, "healthy": ca_health(st) if enabled else False}
+
+
+@router.post("/users/{uid}/issue-certificate", status_code=201)
+def issue_user_certificate(
+    uid: int, body: IssueUserCertIn, request: Request, ctx: Ctx = Depends(require_admin), db=Depends(get_db)
+):
+    st = request.app.state.settings
+    u = _get_user(db, uid)
+    cn = _clean_cn(body.common_name or u.display_name or u.username)
+    if body.key_ref and body.key_ref.strip():
+        key_ref = body.key_ref.strip()
+        if not KEY_REF_RE.match(key_ref) or len(key_ref) < 2:
+            raise HTTPException(400, "key_ref chỉ gồm chữ, số, _, - (2-64 ký tự)")
+        if db.scalar(select(Certificate).where(Certificate.key_ref == key_ref)):
+            raise HTTPException(409, "key_ref đã tồn tại")
+    else:
+        key_ref = _next_key_ref(db, u.username)
+
+    info = ca_issue(st, key_ref, cn, body.days)
+    c = Certificate(
+        key_ref=key_ref,
+        subject=info["subject"][:255],
+        serial=info["serial"],
+        not_after=info["not_after"],
+    )
+    db.add(c)
+    db.flush()
+    db.add(UserCertificate(user_id=u.id, cert_id=c.id))
+    audit(db, ctx.ip, "cert_issue", user=ctx.user, cert_key_ref=c.key_ref,
+          detail=f"target={u.username} days={body.days}", commit=False)
+    audit(db, ctx.ip, "cert_assign", user=ctx.user,
+          detail=f"target={u.username} certs={[c.id]}", commit=False)
+    db.commit()
+    return {"user_id": u.id, "certificate": _cert_out(c)}
+
+
 @router.post("/certificates/{cid}/deactivate")
 def deactivate_cert(cid: int, ctx: Ctx = Depends(require_admin), db=Depends(get_db)):
     c = db.get(Certificate, cid)
@@ -184,6 +299,19 @@ def deactivate_cert(cid: int, ctx: Ctx = Depends(require_admin), db=Depends(get_
     c.active = False
     db.commit()
     audit(db, ctx.ip, "cert_deactivate", user=ctx.user, cert_key_ref=c.key_ref)
+    return _cert_out(c)
+
+
+@router.post("/certificates/{cid}/revoke")
+def revoke_cert(cid: int, request: Request, ctx: Ctx = Depends(require_admin), db=Depends(get_db)):
+    st = request.app.state.settings
+    c = db.get(Certificate, cid)
+    if c is None:
+        raise HTTPException(404, "Không tìm thấy chứng thư")
+    ca_revoke(st, c.key_ref)
+    c.active = False
+    audit(db, ctx.ip, "cert_revoke", user=ctx.user, cert_key_ref=c.key_ref, commit=False)
+    db.commit()
     return _cert_out(c)
 
 

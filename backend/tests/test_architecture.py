@@ -27,9 +27,9 @@ def test_compose_no_docker_sock_and_isolated_services():
     # Chỉ caddy được publish port (80, 443)
     caddy_ports = [str(p) for p in y["services"]["caddy"]["ports"]]
     assert len(caddy_ports) == 2 and any(p.endswith(":80") for p in caddy_ports) and any(p.endswith(":443") for p in caddy_ports)
-    for n in ("db", "converter", "signer", "tsa", "api", "web"):
+    for n in ("db", "converter", "signer", "tsa", "ca", "api", "web"):
         assert not y["services"][n].get("ports"), f"{n} không được publish port"
-    for n in ("db", "converter", "signer", "tsa"):
+    for n in ("db", "converter", "signer", "tsa", "ca"):
         assert y["services"][n]["networks"] == ["internal"], f"{n} chỉ nằm trong mạng nội bộ"
     assert y["networks"]["internal"]["internal"] is True
     conv = y["services"]["converter"]
@@ -40,14 +40,15 @@ def test_api_has_no_access_to_keys_or_passphrase():
     y = _compose()
     api, signer = y["services"]["api"], y["services"]["signer"]
     assert "P12_PASSPHRASE" not in api["environment"] and "P12_PASSPHRASE_FILE" not in api["environment"]
-    assert "p12_passphrase" not in api.get("secrets", [])
+    assert "INT_PASS" not in api["environment"] and "INT_PASS_FILE" not in api["environment"]
+    assert "p12_passphrase" not in api.get("secrets", []) and "int_passphrase" not in api.get("secrets", [])
     assert all("/pki" not in str(v) for v in api.get("volumes", []))
     assert any(str(v).endswith(":/pki/issued:ro") for v in signer["volumes"])
     assert "P12_PASSPHRASE_FILE" in signer["environment"] and "p12_passphrase" in signer.get("secrets", [])
 
 
 def test_repo_has_no_hardcoded_passphrase_or_docker_sock_in_service_files():
-    for rel in ("backend/app", "signer/service.py", "converter/server.py", "docker-compose.yml"):
+    for rel in ("backend/app", "signer/service.py", "ca/service.py", "converter/server.py", "docker-compose.yml"):
         p = os.path.join(ROOT, rel)
         files = [p] if os.path.isfile(p) else [os.path.join(d, f) for d, _, fs in os.walk(p) for f in fs if f.endswith(".py")]
         for f in files:

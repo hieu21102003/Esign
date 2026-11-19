@@ -10,6 +10,7 @@ interface AdminUser {
   is_active: boolean;
   totp_enabled: boolean;
   locked: boolean;
+  cert_refs?: string[];
 }
 
 interface AdminCert {
@@ -53,28 +54,44 @@ export function AdminView() {
   const [avail, setAvail] = useState<AvailCert[]>([]);
   const [audit, setAudit] = useState<AuditItem[]>([]);
   const [warnings, setWarnings] = useState<ExpiryItem[]>([]);
+  const [caEnabled, setCaEnabled] = useState(false);
+  const [caHealthy, setCaHealthy] = useState(false);
+  const [caStatusInited, setCaStatusInited] = useState(false);
   const [username, setUsername] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [issueCert, setIssueCert] = useState(false);
+  const [certDays, setCertDays] = useState(365);
+  const [busy, setBusy] = useState(false);
   const [editEmailUid, setEditEmailUid] = useState<number | null>(null);
   const [editEmailVal, setEditEmailVal] = useState("");
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
 
   async function loadAll() {
-    const [u, c, av, au, ew] = await Promise.all([
+    const [u, c, av, au, ew, ca] = await Promise.all([
       apiJson<AdminUser[]>("/api/admin/users"),
       apiJson<AdminCert[]>("/api/admin/certificates"),
       apiJson<AvailCert[]>("/api/admin/certificates/available"),
       apiJson<AuditItem[]>("/api/admin/audit?limit=50"),
       apiJson<{ warnings: ExpiryItem[] }>("/api/admin/expiry-warnings?days=30").catch(() => ({ warnings: [] })),
+      apiJson<{ enabled: boolean; healthy: boolean }>("/api/admin/ca/status").catch(() => ({
+        enabled: false,
+        healthy: false,
+      })),
     ]);
     setUsers(u);
     setCerts(c);
     setAvail(av);
     setAudit(au);
     setWarnings(ew.warnings || []);
+    setCaEnabled(Boolean(ca.enabled));
+    setCaHealthy(Boolean(ca.healthy));
+    if (!caStatusInited) {
+      setIssueCert(Boolean(ca.enabled && ca.healthy));
+      setCaStatusInited(true);
+    }
   }
 
   useEffect(() => {
@@ -85,8 +102,9 @@ export function AdminView() {
     e.preventDefault();
     setErr("");
     setMsg("");
+    setBusy(true);
     try {
-      await apiJson("/api/admin/users", {
+      const res = await apiJson<AdminUser & { certificate?: AdminCert }>("/api/admin/users", {
         method: "POST",
         body: JSON.stringify({
           username,
@@ -94,16 +112,58 @@ export function AdminView() {
           email: email.trim() || null,
           password,
           role: "user",
+          issue_cert: issueCert,
+          cert_days: certDays,
         }),
       });
       setUsername("");
       setDisplayName("");
       setEmail("");
       setPassword("");
-      setMsg("Đã tạo người dùng mới");
+      setMsg(
+        res.certificate
+          ? `Đã tạo user "${res.username}" và tự động cấp chứng thư "${res.certificate.key_ref}"`
+          : "Đã tạo người dùng mới",
+      );
       await loadAll();
     } catch (ex) {
       setErr(ex instanceof Error ? ex.message : "Lỗi tạo người dùng");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function issueUserCert(u: AdminUser) {
+    setErr("");
+    setMsg("");
+    setBusy(true);
+    try {
+      const res = await apiJson<{ certificate: AdminCert }>(`/api/admin/users/${u.id}/issue-certificate`, {
+        method: "POST",
+        body: JSON.stringify({ days: certDays }),
+      });
+      setMsg(`Đã cấp và gán chứng thư "${res.certificate.key_ref}" cho ${u.username}`);
+      await loadAll();
+    } catch (ex) {
+      setErr(ex instanceof Error ? ex.message : "Cấp chứng thư thất bại");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function revokeCert(c: AdminCert) {
+    if (!window.confirm(`Thu hồi vĩnh viễn chứng thư "${c.key_ref}" (${c.subject})?`)) return;
+    setErr("");
+    setMsg("");
+    setBusy(true);
+    try {
+      await apiJson(`/api/admin/certificates/${c.id}/revoke`, { method: "POST" });
+      setMsg(`Đã thu hồi chứng thư "${c.key_ref}" và cập nhật CRL`);
+      await loadAll();
+    } catch (ex) {
+      setErr(ex instanceof Error ? ex.message : "Thu hồi chứng thư thất bại");
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -133,6 +193,7 @@ export function AdminView() {
     setErr("");
     await apiJson(`/api/admin/users/${uid}/certificates`, { method: "PUT", body: JSON.stringify({ cert_ids: [cid] }) });
     setMsg("Đã gán chứng thư");
+    await loadAll();
   }
 
   return (
@@ -152,22 +213,54 @@ export function AdminView() {
       )}
 
       <div className="card stack">
-        <h3>Tạo người dùng</h3>
+        <div className="preview-toolbar">
+          <h3>Tạo người dùng</h3>
+          <span className={`badge ${caEnabled ? (caHealthy ? "ok" : "bad") : "muted"}`} data-testid="admin-ca-status">
+            {caEnabled ? (caHealthy ? "CA tự động: Sẵn sàng" : "CA tự động: Không kết nối") : "CA tự động: Chưa cấu hình"}
+          </span>
+        </div>
         <form onSubmit={handleCreateUser} className="row wrap">
           <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="username" required style={{ maxWidth: 160 }} />
           <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="Tên hiển thị" style={{ maxWidth: 180 }} />
           <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email (tùy chọn)" style={{ maxWidth: 210 }} />
           <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Mật khẩu (>=10 ký tự)" required style={{ maxWidth: 200 }} />
-          <button type="submit" className="btn primary small">Tạo user</button>
+          {caEnabled && (
+            <>
+              <label className="check-item" style={{ fontWeight: 600 }}>
+                <input
+                  type="checkbox"
+                  checked={issueCert}
+                  onChange={(e) => setIssueCert(e.target.checked)}
+                  data-testid="admin-issue-cert-check"
+                />
+                <span>Tự động cấp &amp; gán chứng thư (.p12)</span>
+              </label>
+              <select
+                value={certDays}
+                onChange={(e) => setCertDays(Number(e.target.value))}
+                style={{ width: "auto" }}
+                data-testid="admin-cert-days"
+              >
+                <option value={365}>1 năm (365 ngày)</option>
+                <option value={730}>2 năm (730 ngày)</option>
+              </select>
+            </>
+          )}
+          <button type="submit" className="btn primary small" disabled={busy}>
+            {busy ? "Đang xử lý..." : "Tạo user"}
+          </button>
         </form>
         <table className="tbl">
           <thead>
-            <tr><th>User</th><th>Email</th><th>Vai trò</th><th>2FA</th><th>Trạng thái</th><th>Thao tác</th></tr>
+            <tr><th>User</th><th>Email</th><th>Chứng thư</th><th>Vai trò</th><th>2FA</th><th>Trạng thái</th><th>Thao tác</th></tr>
           </thead>
           <tbody>
             {users.map((u) => (
               <tr key={u.id}>
-                <td>{u.username}</td>
+                <td>
+                  <strong>{u.username}</strong>
+                  {u.display_name && <div className="muted">{u.display_name}</div>}
+                </td>
                 <td>
                   {editEmailUid === u.id ? (
                     <div className="row">
@@ -197,11 +290,33 @@ export function AdminView() {
                     </div>
                   )}
                 </td>
+                <td>
+                  {u.cert_refs && u.cert_refs.length > 0 ? (
+                    <div className="row wrap">
+                      {u.cert_refs.map((kr) => (
+                        <span key={kr} className="badge ok">{kr}</span>
+                      ))}
+                    </div>
+                  ) : (
+                    <span className="muted">Chưa có</span>
+                  )}
+                </td>
                 <td>{u.role}</td>
                 <td>{u.totp_enabled ? "Bật" : "Chưa"}</td>
                 <td>{u.is_active ? (u.locked ? "Đang khóa" : "Hoạt động") : "Vô hiệu"}</td>
                 <td className="row wrap">
-                  {certs.map((c) => (
+                  {caEnabled && (
+                    <button
+                      type="button"
+                      className="btn tiny primary"
+                      disabled={busy}
+                      onClick={() => issueUserCert(u)}
+                      data-testid={`admin-issue-user-cert-${u.username}`}
+                    >
+                      Cấp cert mới
+                    </button>
+                  )}
+                  {certs.filter((c) => c.active).map((c) => (
                     <button key={c.id} type="button" className="btn tiny" onClick={() => assignCert(u.id, c.id)}>
                       Gán {c.key_ref}
                     </button>
@@ -219,7 +334,43 @@ export function AdminView() {
       </div>
 
       <div className="card stack">
-        <h3>Chứng thư từ service signer</h3>
+        <h3>Chứng thư đã đăng ký ({certs.length})</h3>
+        {certs.length > 0 && (
+          <table className="tbl">
+            <thead>
+              <tr><th>key_ref</th><th>Chủ thể (CN)</th><th>Serial</th><th>Hết hạn</th><th>Trạng thái</th><th>Thao tác</th></tr>
+            </thead>
+            <tbody>
+              {certs.map((c) => (
+                <tr key={c.id}>
+                  <td className="mono">{c.key_ref}</td>
+                  <td>{c.subject}</td>
+                  <td className="mono">{c.serial}</td>
+                  <td className="mono">{c.not_after.slice(0, 10)}</td>
+                  <td>
+                    <span className={`badge ${c.active ? "ok" : "bad"}`}>
+                      {c.active ? "Hoạt động" : "Đã thu hồi / vô hiệu"}
+                    </span>
+                  </td>
+                  <td>
+                    {caEnabled && c.active && (
+                      <button
+                        type="button"
+                        className="btn tiny danger"
+                        disabled={busy}
+                        onClick={() => revokeCert(c)}
+                        data-testid={`admin-revoke-cert-${c.key_ref}`}
+                      >
+                        Thu hồi (Revoke)
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        <h4 style={{ margin: "6px 0 0 0", fontSize: 13 }}>Chứng thư từ service signer (đăng ký thủ công)</h4>
         <div className="row wrap">
           {avail.map((a) => (
             <div key={a.key_ref} className="badge-box">

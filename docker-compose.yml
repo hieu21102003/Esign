@@ -26,6 +26,10 @@ secrets:
     file: ${SECRETS_DIR:-./secrets}/p12_passphrase
   signer_token:
     file: ${SECRETS_DIR:-./secrets}/signer_token
+  ca_token:
+    file: ${SECRETS_DIR:-./secrets}/ca_token
+  int_passphrase:
+    file: ${SECRETS_DIR:-./secrets}/int_passphrase
   totp_enc_key:
     file: ${SECRETS_DIR:-./secrets}/totp_enc_key
   db_password:
@@ -98,6 +102,33 @@ services:
       timeout: 5s
       retries: 20
 
+  ca:
+    build: {context: ., dockerfile: ca/Dockerfile}
+    image: esign-ca:latest
+    restart: unless-stopped
+    <<: *hardening
+    user: "10005:10002"
+    tmpfs: ["/tmp:rw,nosuid,nodev,size=32m"]
+    mem_limit: 256m
+    environment:
+      CA_TOKEN_FILE: /run/secrets/ca_token
+      INT_PASS_FILE: /run/secrets/int_passphrase
+      P12_PASSPHRASE_FILE: /run/secrets/p12_passphrase
+      PKI_DIR: /pki
+      ORG: ${ORG:-Tecco1}
+      CRL_BASE: ${CRL_BASE:-http://192.168.1.66/pki}
+    secrets: [ca_token, int_passphrase, p12_passphrase]
+    volumes:
+      - ${PKI_HOST_DIR:-./pki-data}/int:/pki/int
+      - ${PKI_HOST_DIR:-./pki-data}/issued:/pki/issued
+      - ${PKI_HOST_DIR:-./pki-data}/public:/pki/public
+    networks: [internal]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:9001/health',timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
   tsa:
     build: {context: ., dockerfile: deploy/tsa/Dockerfile}
     image: esign-tsa:latest
@@ -133,6 +164,8 @@ services:
       CONVERTER_URL: http://converter:8001
       SIGNER_URL: http://signer:9000
       SIGNER_TOKEN_FILE: /run/secrets/signer_token
+      CA_URL: http://ca:9001
+      CA_TOKEN_FILE: /run/secrets/ca_token
       TOTP_ENC_KEY_FILE: /run/secrets/totp_enc_key
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       ADMIN_PASSWORD_FILE: /run/secrets/admin_password
@@ -146,7 +179,7 @@ services:
       SMTP_PASS: ${SMTP_PASS:-}
       SMTP_FROM: ${SMTP_FROM:-}
       SMTP_TLS: ${SMTP_TLS:-true}
-    secrets: [signer_token, totp_enc_key, db_password, admin_password]
+    secrets: [signer_token, ca_token, totp_enc_key, db_password, admin_password]
     volumes:
       - api-data:/data
     networks: [internal, edge]
@@ -154,6 +187,7 @@ services:
       db: {condition: service_healthy}
       converter: {condition: service_healthy}
       signer: {condition: service_healthy}
+      ca: {condition: service_healthy}
     healthcheck:
       test: ["CMD", "python3", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/api/health',timeout=3)"]
       interval: 5s

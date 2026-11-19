@@ -57,6 +57,9 @@ class Settings:
     totp_issuer: str = "esign"
     signer_timeout: int = 120
     converter_timeout: int = 70
+    ca_url: str = ""
+    ca_token: str = ""
+    ca_timeout: int = 30
     smtp_host: str = ""
     smtp_port: int = 587
     smtp_user: str = ""
@@ -107,6 +110,8 @@ class Settings:
             admin_username=os.environ.get("ADMIN_USERNAME", ""),
             admin_password=read_secret("ADMIN_PASSWORD"),
             totp_issuer=os.environ.get("TOTP_ISSUER", "esign"),
+            ca_url=os.environ.get("CA_URL", "").strip(),
+            ca_token=read_secret("CA_TOKEN"),
             smtp_host=os.environ.get("SMTP_HOST", "").strip(),
             smtp_port=int(os.environ.get("SMTP_PORT", "587")),
             smtp_user=os.environ.get("SMTP_USER", "").strip(),
