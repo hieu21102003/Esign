@@ -91,13 +91,18 @@ read -s -p "ADMIN_PASSWORD: " APW; echo
 printf '%s' "$APW" > secrets/admin_password
 unset APW
 
+# Mật khẩu hộp thư SMTP (để trống nếu chưa dùng email):
+read -s -p "SMTP_PASS (Enter nếu chưa dùng): " SPW; echo
+printf '%s' "$SPW" > secrets/smtp_pass
+unset SPW
+
 chmod 700 secrets
 chmod 400 secrets/*
 umask 022  # khôi phục umask mặc định để git pull về sau không tạo file quyền 600
 
 # Phân quyền đúng theo UID từng container (ca=10005, signer=10002, api=10004, postgres=70):
 sudo chown 10005:10005 secrets/int_passphrase
-sudo chown 10004:10004 secrets/totp_enc_key secrets/admin_password
+sudo chown 10004:10004 secrets/totp_enc_key secrets/admin_password secrets/smtp_pass
 sudo chown root:root secrets/signer_token secrets/ca_token secrets/p12_passphrase secrets/db_password
 sudo setfacl -m u:10002:r secrets/p12_passphrase
 sudo setfacl -m u:10005:r secrets/p12_passphrase
@@ -119,6 +124,27 @@ docker compose up -d --build
 docker compose ps
 ```
 Kiểm tra: chỉ `caddy` mở cổng `80` và `443`; `db`, `api`, `web`, `signer`, `converter`, `tsa` chỉ chạy trong mạng nội bộ.
+
+### Cấu hình Email SMTP & `APP_BASE_URL` (tùy chọn)
+- Hệ thống ưu tiên đọc mật khẩu SMTP từ file secret `/run/secrets/smtp_pass` qua `SMTP_PASS_FILE` (chỉ fallback về biến `SMTP_PASS` trong `.env` khi file trống hoặc không có).
+- Tạo và phân quyền file secret cho container `api` (UID `10004`):
+```bash
+umask 077
+printf '%s' 'MAT_KHAU_EMAIL' > secrets/smtp_pass
+sudo chown 10004:10004 secrets/smtp_pass
+chmod 400 secrets/smtp_pass
+umask 022
+```
+- Cấu hình các tham số không nhạy cảm trong `.env` (`SMTP_HOST` phải khớp đúng tên trong chứng chỉ TLS của máy chủ SMTP, ví dụ `gir05.nhanhoa.com`; kết nối luôn xác minh chuỗi chứng chỉ và hostname đầy đủ):
+```dotenv
+SMTP_HOST=gir05.nhanhoa.com
+SMTP_PORT=587
+SMTP_USER=info@smart-rail.vn
+SMTP_FROM=info@smart-rail.vn
+SMTP_TLS=true
+APP_BASE_URL=https://192.168.1.66   # hoặc tên miền truy cập web nội bộ; bỏ trống nếu không kèm link
+```
+- Khởi động lại container `api` (`docker compose up -d api`) và dùng nút **Gửi email thử** trong tab **Quản trị** để kiểm tra kết nối, TLS và xác thực.
 
 ---
 

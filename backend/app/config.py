@@ -17,6 +17,22 @@ def read_secret(name: str, default: str = "") -> str:
     return default
 
 
+def read_secret_file_first(name: str, default: str = "", *, optional: bool = False) -> str:
+    """Ưu tiên đọc bí mật từ biến <TÊN>_FILE; chỉ fallback sang biến <TÊN> khi file trống hoặc thiếu (nếu optional=True)."""
+    f = (os.environ.get(name + "_FILE") or "").strip()
+    if f:
+        try:
+            with open(f, "r", encoding="utf-8") as fh:
+                val = fh.read().rstrip("\r\n")
+            if val:
+                return val
+        except FileNotFoundError:
+            if not optional:
+                raise
+    v = (os.environ.get(name) or "").rstrip("\r\n")
+    return v if v else default
+
+
 def _rate(name: str, default: str) -> tuple:
     n, w = os.environ.get(name, default).split("/")
     return int(n), int(w)
@@ -52,6 +68,7 @@ class Settings:
     sign_rate: tuple = (10, 60)       # theo user
     upload_rate: tuple = (20, 60)     # theo user
     verify_rate: tuple = (30, 60)     # theo user/IP
+    smtp_test_rate: tuple = (5, 60)   # giới hạn gửi email thử theo admin user
     trust_proxy: bool = False         # chỉ bật khi sau reverse proxy tin cậy (Caddy)
     trusted_proxies: list[str] = field(default_factory=list)
     cleanup_interval_seconds: int = 3600
@@ -69,6 +86,7 @@ class Settings:
     smtp_pass: str = ""
     smtp_from: str = ""
     smtp_tls: bool = True
+    app_base_url: str = ""
     terms_file: str = ""
     terms_version: str = ""
     onboarding_otp_ttl_minutes: int = 5
@@ -112,6 +130,7 @@ class Settings:
             sign_rate=_rate("RATE_SIGN", "10/60"),
             upload_rate=_rate("RATE_UPLOAD", "20/60"),
             verify_rate=_rate("RATE_VERIFY", "30/60"),
+            smtp_test_rate=_rate("RATE_SMTP_TEST", "5/60"),
             trust_proxy=_bool("TRUST_PROXY", False),
             trusted_proxies=proxies,
             cleanup_interval_seconds=int(os.environ.get("CLEANUP_INTERVAL_SECONDS", "3600")),
@@ -123,9 +142,10 @@ class Settings:
             smtp_host=os.environ.get("SMTP_HOST", "").strip(),
             smtp_port=int(os.environ.get("SMTP_PORT", "587")),
             smtp_user=os.environ.get("SMTP_USER", "").strip(),
-            smtp_pass=read_secret("SMTP_PASS"),
+            smtp_pass=read_secret_file_first("SMTP_PASS", optional=True),
             smtp_from=os.environ.get("SMTP_FROM", "").strip(),
             smtp_tls=_bool("SMTP_TLS", True),
+            app_base_url=os.environ.get("APP_BASE_URL", "").strip(),
             terms_file=os.environ.get("TERMS_FILE", "").strip(),
             terms_version=os.environ.get("TERMS_VERSION", "").strip(),
         )

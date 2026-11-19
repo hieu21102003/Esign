@@ -368,7 +368,7 @@ def send_onboarding_email_otp(request: Request, ctx: Ctx = Depends(require_mfa_o
     sent = send_email_smtp(
         st,
         u.email,
-        "[esign] Mã OTP xác nhận điều khoản chữ ký số nội bộ",
+        "[Ký số] Mã OTP xác nhận điều khoản chữ ký số nội bộ",
         f"Xin chào {u.display_name or u.username},\n\n"
         f"Mã OTP xác nhận của bạn là: {code}\n"
         f"Mã có hiệu lực trong {st.onboarding_otp_ttl_minutes} phút và chỉ dùng một lần.\n",
@@ -615,7 +615,7 @@ def complete_onboarding(
             f"- Serial: {final_cert.serial}\n"
             f"- Hiệu lực đến: {final_cert.not_after}\n"
         )
-        dispatch_emails(st, [(u.email, "[esign] Kích hoạt chữ ký số nội bộ thành công", msg_body)])
+        dispatch_emails(st, [(u.email, "[Ký số] Kích hoạt chữ ký số nội bộ thành công", msg_body)])
 
     return {
         "ok": True,

@@ -415,6 +415,7 @@ def create_document(body: DocumentCreateIn, request: Request, ctx: Ctx = Depends
         db, st, assignee_ids, document_id=doc.id, kind="assigned",
         title=f"Cần ký tài liệu: {doc.title}",
         message=f"{_actor_label(ctx.user)} đã giao cho bạn ký tài liệu \"{doc.title}\" (Bước 1).",
+        email_subject=f"[Ký số] Bạn được giao ký tài liệu: {doc.title}",
         commit=False,
     )
     db.commit()
@@ -732,6 +733,7 @@ def sign_document(
                         db, st, next_uids, document_id=doc.id, kind="assigned",
                         title=f"Cần ký tài liệu: {doc.title}",
                         message=f"{_actor_label(actor)} đã chuyển tiếp cho bạn ký tài liệu \"{doc.title}\" (Bước {next_step.step_order}).",
+                        email_subject=f"[Ký số] Bạn được giao ký tài liệu: {doc.title}",
                         commit=False,
                     )
                 elif body.next_action == "complete":
@@ -747,6 +749,7 @@ def sign_document(
                         db, st, recipients, document_id=doc.id, kind="completed",
                         title=f"Tài liệu hoàn tất: {doc.title}",
                         message=f"Tài liệu \"{doc.title}\" đã hoàn tất đầy đủ chữ ký (người chốt: {_actor_label(actor)}).",
+                        email_subject=f"[Ký số] Tài liệu đã hoàn tất: {doc.title}",
                         commit=False,
                     )
 
@@ -795,6 +798,7 @@ def assign_next_step(
             db, st, next_uids, document_id=doc.id, kind="assigned",
             title=f"Cần ký tài liệu: {doc.title}",
             message=f"{_actor_label(actor)} đã chuyển tiếp cho bạn ký tài liệu \"{doc.title}\" (Bước {next_step.step_order}).",
+            email_subject=f"[Ký số] Bạn được giao ký tài liệu: {doc.title}",
             commit=False,
         )
         db.commit()
@@ -830,6 +834,7 @@ def complete_document(doc_id: str, request: Request, ctx: Ctx = Depends(require_
             db, st, recipients, document_id=doc.id, kind="completed",
             title=f"Tài liệu hoàn tất: {doc.title}",
             message=f"Tài liệu \"{doc.title}\" đã hoàn tất đầy đủ chữ ký (người chốt: {_actor_label(actor)}).",
+            email_subject=f"[Ký số] Tài liệu đã hoàn tất: {doc.title}",
             commit=False,
         )
         db.commit()
@@ -879,6 +884,7 @@ def reject_document(
             db, st, recipients, document_id=doc.id, kind="rejected",
             title=f"Tài liệu bị từ chối: {doc.title}",
             message=f"{_actor_label(actor)} đã từ chối ký tài liệu \"{doc.title}\": {body.reason}",
+            email_subject=f"[Ký số] Tài liệu bị từ chối: {doc.title}",
             commit=False,
         )
         db.commit()
@@ -932,6 +938,7 @@ def cancel_document(
             db, st, recipients, document_id=doc.id, kind="cancelled",
             title=f"Luồng ký đã bị hủy: {doc.title}",
             message=f"{_actor_label(actor)} đã hủy luồng ký \"{doc.title}\"" + (f": {reason}" if reason else "."),
+            email_subject=f"[Ký số] Luồng ký đã bị hủy: {doc.title}",
             commit=False,
         )
         db.commit()

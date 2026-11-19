@@ -56,6 +56,24 @@ interface ExpiryItem {
   status: string;
 }
 
+interface SmtpStatus {
+  enabled: boolean;
+  host: string;
+  port: number;
+  tls_mode: string;
+  smtp_tls: boolean;
+  from_email: string;
+  password_set: boolean;
+  app_base_url_configured: boolean;
+}
+
+interface SmtpTestResult {
+  ok: boolean;
+  to_email: string;
+  error_code: string;
+  message: string;
+}
+
 export function AdminView({ currentUserId }: { currentUserId?: number } = {}) {
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [certs, setCerts] = useState<AdminCert[]>([]);
@@ -74,11 +92,15 @@ export function AdminView({ currentUserId }: { currentUserId?: number } = {}) {
   const [busy, setBusy] = useState(false);
   const [editEmailUid, setEditEmailUid] = useState<number | null>(null);
   const [editEmailVal, setEditEmailVal] = useState("");
+  const [smtpStatus, setSmtpStatus] = useState<SmtpStatus | null>(null);
+  const [testEmailTo, setTestEmailTo] = useState("");
+  const [smtpBusy, setSmtpBusy] = useState(false);
+  const [smtpResult, setSmtpResult] = useState<SmtpTestResult | null>(null);
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
 
   async function loadAll() {
-    const [u, c, av, au, ew, ca] = await Promise.all([
+    const [u, c, av, au, ew, ca, sm] = await Promise.all([
       apiJson<AdminUser[]>("/api/admin/users"),
       apiJson<AdminCert[]>("/api/admin/certificates"),
       apiJson<AvailCert[]>("/api/admin/certificates/available"),
@@ -88,6 +110,7 @@ export function AdminView({ currentUserId }: { currentUserId?: number } = {}) {
         enabled: false,
         healthy: false,
       })),
+      apiJson<SmtpStatus>("/api/admin/smtp/status").catch(() => null),
     ]);
     setUsers(u);
     setCerts(c);
@@ -96,6 +119,7 @@ export function AdminView({ currentUserId }: { currentUserId?: number } = {}) {
     setWarnings(ew.warnings || []);
     setCaEnabled(Boolean(ca.enabled));
     setCaHealthy(Boolean(ca.healthy));
+    setSmtpStatus(sm);
     if (!caStatusInited) {
       setIssueCert(Boolean(ca.enabled && ca.healthy));
       setCaStatusInited(true);
@@ -326,6 +350,31 @@ export function AdminView({ currentUserId }: { currentUserId?: number } = {}) {
     await loadAll();
   }
 
+  async function handleSmtpTest(e: React.FormEvent) {
+    e.preventDefault();
+    const target = testEmailTo.trim();
+    if (!target) return;
+    setSmtpBusy(true);
+    setSmtpResult(null);
+    try {
+      const res = await apiJson<SmtpTestResult>("/api/admin/smtp/test", {
+        method: "POST",
+        body: JSON.stringify({ to_email: target }),
+      });
+      setSmtpResult(res);
+      await loadAll();
+    } catch (ex) {
+      setSmtpResult({
+        ok: false,
+        to_email: target,
+        error_code: "request_error",
+        message: ex instanceof Error ? ex.message : "Gửi email thử thất bại",
+      });
+    } finally {
+      setSmtpBusy(false);
+    }
+  }
+
   return (
     <div className="stack">
       {err && <div className="alert error">{err}</div>}
@@ -548,6 +597,81 @@ export function AdminView({ currentUserId }: { currentUserId?: number } = {}) {
             ))}
           </tbody>
         </table>
+      </div>
+
+      <div className="card stack" data-testid="admin-smtp-card">
+        <div className="preview-toolbar">
+          <h3>Cấu hình Email (SMTP) &amp; Gửi thử</h3>
+          <span
+            className={`badge ${smtpStatus?.enabled ? "ok" : "muted"}`}
+            data-testid="admin-smtp-badge"
+          >
+            {smtpStatus ? (smtpStatus.enabled ? "SMTP: Đã bật" : "SMTP: Chưa bật") : "Đang kiểm tra..."}
+          </span>
+        </div>
+        {smtpStatus && (
+          <table className="tbl" data-testid="admin-smtp-info">
+            <tbody>
+              <tr>
+                <th>Trạng thái</th>
+                <td>{smtpStatus.enabled ? "Đã bật" : "Chưa bật (hệ thống bỏ qua gửi email)"}</td>
+                <th>Máy chủ (Host)</th>
+                <td className="mono">{smtpStatus.host || "-"}</td>
+              </tr>
+              <tr>
+                <th>Cổng (Port)</th>
+                <td className="mono">{smtpStatus.enabled ? smtpStatus.port : "-"}</td>
+                <th>Kiểu TLS</th>
+                <td>
+                  {smtpStatus.enabled
+                    ? `${smtpStatus.tls_mode} (xác minh chứng chỉ & tên host đầy đủ)`
+                    : "-"}
+                </td>
+              </tr>
+              <tr>
+                <th>Địa chỉ gửi (From)</th>
+                <td className="mono">{smtpStatus.from_email || "-"}</td>
+                <th>Mật khẩu SMTP</th>
+                <td>{smtpStatus.password_set ? "Đã cấu hình (ẩn)" : "Chưa cấu hình"}</td>
+              </tr>
+              <tr>
+                <th>Link mở tài liệu (APP_BASE_URL)</th>
+                <td colSpan={3}>
+                  {smtpStatus.app_base_url_configured
+                    ? "Đã cấu hình (email thông báo sẽ kèm link mở tài liệu)"
+                    : "Chưa cấu hình (email gửi dạng chữ thuần, không kèm link)"}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        )}
+        <form onSubmit={handleSmtpTest} className="row wrap">
+          <input
+            type="email"
+            value={testEmailTo}
+            onChange={(e) => setTestEmailTo(e.target.value)}
+            placeholder="Nhập email người nhận để gửi thử"
+            required
+            style={{ maxWidth: 280 }}
+            data-testid="admin-smtp-test-input"
+          />
+          <button
+            type="submit"
+            className="btn primary small"
+            disabled={smtpBusy}
+            data-testid="admin-smtp-test-btn"
+          >
+            {smtpBusy ? "Đang gửi..." : "Gửi email thử"}
+          </button>
+        </form>
+        {smtpResult && (
+          <div
+            className={`alert ${smtpResult.ok ? "ok" : "error"}`}
+            data-testid="admin-smtp-test-result"
+          >
+            {smtpResult.message}
+          </div>
+        )}
       </div>
 
       <div className="card stack">

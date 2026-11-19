@@ -36,6 +36,8 @@ secrets:
     file: ${SECRETS_DIR:-./secrets}/db_password
   admin_password:
     file: ${SECRETS_DIR:-./secrets}/admin_password
+  smtp_pass:
+    file: ${SECRETS_DIR:-./secrets}/smtp_pass
 
 services:
   db:
@@ -176,10 +178,12 @@ services:
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS_FILE: /run/secrets/smtp_pass
       SMTP_PASS: ${SMTP_PASS:-}
       SMTP_FROM: ${SMTP_FROM:-}
       SMTP_TLS: ${SMTP_TLS:-true}
-    secrets: [signer_token, ca_token, totp_enc_key, db_password, admin_password]
+      APP_BASE_URL: ${APP_BASE_URL:-}
+    secrets: [signer_token, ca_token, totp_enc_key, db_password, admin_password, smtp_pass]
     volumes:
       - api-data:/data
     networks: [internal, edge]

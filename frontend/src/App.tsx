@@ -10,6 +10,14 @@ import { VerifyView } from "./components/VerifyView";
 import { WorkflowView } from "./components/WorkflowView";
 import { apiJson, setCsrfToken, type MeResponse, type StoredFile } from "./lib/api";
 
+const DOC_PATH_RE = /^\/documents\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/?$/i;
+
+function clearDocumentPath() {
+  if (typeof window !== "undefined" && window.location.pathname !== "/") {
+    window.history.replaceState(null, "", "/");
+  }
+}
+
 export function App() {
   const [me, setMe] = useState<MeResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -17,6 +25,11 @@ export function App() {
   const [verifyFileId, setVerifyFileId] = useState<string | null>(null);
   const [openSignFile, setOpenSignFile] = useState<StoredFile | null>(null);
   const [openWorkflowDocId, setOpenWorkflowDocId] = useState<string | null>(null);
+  const [pendingUrlDocId, setPendingUrlDocId] = useState<string | null>(() => {
+    if (typeof window === "undefined") return null;
+    const m = window.location.pathname.match(DOC_PATH_RE);
+    return m ? m[1] : null;
+  });
   const [workflowResetTick, setWorkflowResetTick] = useState(0);
   const [notifTick, setNotifTick] = useState(0);
 
@@ -36,6 +49,19 @@ export function App() {
   useEffect(() => {
     refreshMe();
   }, []);
+
+  useEffect(() => {
+    if (me && me.mfa_verified && !me.onboarding_required && pendingUrlDocId) {
+      setOpenWorkflowDocId(pendingUrlDocId);
+      setTab("workflow");
+      setPendingUrlDocId(null);
+    }
+  }, [me, pendingUrlDocId]);
+
+  function switchTab(next: "sign" | "workflow" | "docs" | "verify" | "account" | "admin") {
+    clearDocumentPath();
+    setTab(next);
+  }
 
   async function handleLogout() {
     try {
@@ -69,7 +95,7 @@ export function App() {
             <button
               type="button"
               className={`btn small ${tab === "sign" ? "primary" : "ghost"}`}
-              onClick={() => setTab("sign")}
+              onClick={() => switchTab("sign")}
               data-testid="tab-sign"
             >
               Ký số PDF
@@ -78,6 +104,7 @@ export function App() {
               type="button"
               className={`btn small ${tab === "workflow" ? "primary" : "ghost"}`}
               onClick={() => {
+                clearDocumentPath();
                 setOpenWorkflowDocId(null);
                 setWorkflowResetTick((n) => n + 1);
                 setTab("workflow");
@@ -89,7 +116,7 @@ export function App() {
             <button
               type="button"
               className={`btn small ${tab === "docs" ? "primary" : "ghost"}`}
-              onClick={() => setTab("docs")}
+              onClick={() => switchTab("docs")}
               data-testid="tab-docs"
             >
               Tài liệu
@@ -98,6 +125,7 @@ export function App() {
               type="button"
               className={`btn small ${tab === "verify" ? "primary" : "ghost"}`}
               onClick={() => {
+                clearDocumentPath();
                 setVerifyFileId(null);
                 setTab("verify");
               }}
@@ -108,7 +136,7 @@ export function App() {
             <button
               type="button"
               className={`btn small ${tab === "account" ? "primary" : "ghost"}`}
-              onClick={() => setTab("account")}
+              onClick={() => switchTab("account")}
               data-testid="tab-account"
             >
               Tài khoản{!me.has_signing_pin ? " (!)" : ""}
@@ -117,7 +145,7 @@ export function App() {
               <button
                 type="button"
                 className={`btn small ${tab === "admin" ? "primary" : "ghost"}`}
-                onClick={() => setTab("admin")}
+                onClick={() => switchTab("admin")}
                 data-testid="tab-admin"
               >
                 Quản trị
@@ -129,6 +157,7 @@ export function App() {
           <NotificationBell
             refreshSignal={notifTick}
             onOpenDocument={(docId) => {
+              clearDocumentPath();
               setOpenWorkflowDocId(docId);
               setTab("workflow");
             }}

@@ -45,6 +45,17 @@ def test_api_has_no_access_to_keys_or_passphrase():
     assert all("/pki" not in str(v) for v in api.get("volumes", []))
     assert any(str(v).endswith(":/pki/issued:ro") for v in signer["volumes"])
     assert "P12_PASSPHRASE_FILE" in signer["environment"] and "p12_passphrase" in signer.get("secrets", [])
+    assert y["secrets"]["smtp_pass"]["file"] == "${SECRETS_DIR:-./secrets}/smtp_pass"
+    assert "smtp_pass" in api.get("secrets", [])
+    assert api["environment"].get("SMTP_PASS_FILE") == "/run/secrets/smtp_pass"
+    assert "APP_BASE_URL" in api["environment"]
+
+
+def test_smtp_tls_verification_cannot_be_disabled():
+    for rel in ("backend/app/notifications.py", "backend/app/config.py"):
+        src = open(os.path.join(ROOT, rel), encoding="utf-8").read()
+        assert "CERT_NONE" not in src, f"{rel} không được phép tắt kiểm tra chứng chỉ"
+        assert "check_hostname = False" not in src and "check_hostname=False" not in src, rel
 
 
 def test_repo_has_no_hardcoded_passphrase_or_docker_sock_in_service_files():

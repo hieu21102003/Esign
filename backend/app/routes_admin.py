@@ -10,7 +10,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy import delete, desc, func, select, update
 
 from .audit import audit
-from .deps import Ctx, get_db, require_admin
+from .deps import Ctx, get_db, rate_limit, require_admin
+from .notifications import send_email_smtp_detailed, smtp_status_info
 from .pin import now_from_request
 from .pki_helpers import clean_cn, clean_email, next_key_ref
 from .models import (
@@ -67,6 +68,10 @@ class CertIn(BaseModel):
 
 class AssignIn(BaseModel):
     cert_ids: List[int] = Field(max_length=200)
+
+
+class SmtpTestIn(BaseModel):
+    to_email: str = Field(max_length=255)
 
 
 def _user_out(u: User, cert_refs: Optional[List[str]] = None, now=None) -> dict:
@@ -419,6 +424,59 @@ def expiry_warnings(days: int = 30, request: Request = None, ctx: Ctx = Depends(
     for w in warnings:
         log.warning("PKI expiry warning: kind=%s name=%s days_left=%s", w.get("kind"), w.get("name"), w.get("days_left"))
     return {"items": items, "warnings": warnings}
+
+
+@router.get("/smtp/status")
+def get_smtp_status(request: Request, ctx: Ctx = Depends(require_admin)):  # noqa: ARG001
+    """Trả trạng thái cấu hình SMTP hiện tại (không bao giờ trả mật khẩu)."""
+    return smtp_status_info(request.app.state.settings)
+
+
+@router.post("/smtp/test")
+def test_smtp_email(body: SmtpTestIn, request: Request, ctx: Ctx = Depends(require_admin), db=Depends(get_db)):
+    """Gửi một email thử nghiệm để kiểm tra cấu hình SMTP và phân loại lỗi chi tiết cho quản trị viên."""
+    st = request.app.state.settings
+    rate_limit(request, "admin-smtp-test", str(ctx.user.id), st.smtp_test_rate)
+    to_email = clean_email(body.to_email)
+    if not to_email:
+        raise HTTPException(400, "Địa chỉ email nhận không hợp lệ")
+
+    if not (st.smtp_host or "").strip():
+        audit(
+            db, ctx.ip, "smtp_test", user=ctx.user, status="error",
+            detail=f"to={to_email} code=not_configured",
+            metadata={"to_email": to_email, "ok": False, "error_code": "not_configured"},
+        )
+        return {
+            "ok": False,
+            "to_email": to_email,
+            "error_code": "not_configured",
+            "message": "Chưa cấu hình máy chủ SMTP (SMTP_HOST đang trống).",
+        }
+
+    _, now_dt = now_from_request(request)
+    actor_label = (ctx.user.display_name or "").strip() or ctx.user.username
+    subject = "[Ký số] Email kiểm tra cấu hình SMTP"
+    msg_body = (
+        "Đây là email kiểm tra cấu hình SMTP từ hệ thống Ký số nội bộ (esign).\n\n"
+        f"- Người gửi thử: {actor_label} (@{ctx.user.username})\n"
+        f"- Địa chỉ nhận: {to_email}\n"
+        f"- Máy chủ SMTP: {st.smtp_host}:{st.smtp_port}\n"
+        f"- Thời điểm (UTC): {now_dt.isoformat()}\n"
+    )
+    res = send_email_smtp_detailed(st, to_email, subject, msg_body)
+    audit(
+        db, ctx.ip, "smtp_test", user=ctx.user,
+        status="ok" if res.ok else "error",
+        detail=f"to={to_email} result={'ok' if res.ok else res.error_code}",
+        metadata={"to_email": to_email, "ok": res.ok, "error_code": res.error_code or None},
+    )
+    return {
+        "ok": res.ok,
+        "to_email": to_email,
+        "error_code": res.error_code,
+        "message": f"Đã gửi email thử thành công tới {to_email}." if res.ok else res.error_message,
+    }
 
 
 @router.get("/audit")
