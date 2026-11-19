@@ -18,7 +18,7 @@ import pytest
 from pypdf import PdfReader, PdfWriter
 from sqlalchemy import select
 
-from conftest import ROOT, TEST_DATA, build_env, read
+from conftest import ROOT, TEST_DATA, TEST_SIGN_PIN, build_env, read
 
 
 def _make_pdf(pages: int = 2) -> bytes:
@@ -70,6 +70,7 @@ def _sign_body(cert_id: int, **kw) -> dict:
         "reason": "Đồng ý ký duyệt",
         "show": ["name", "date", "reason"],
         "level": "B-T",
+        "pin": TEST_SIGN_PIN,
     }
     body.update(kw)
     return body
@@ -299,12 +300,12 @@ def test_w2_concurrent_parallel_signing_preserves_both_signatures(env_light, mon
     _patch_fake_signer(monkeypatch, delay=0.15, recorder=recorder)
 
     ua = env_light.make_user("con_a")
-    ub = env_light.make_user("con_b")
-    uc = env_light.make_user("con_c")
+    ub = env_light.make_user("con_b", pin="371946")
+    uc = env_light.make_user("con_c", pin="482615")
     cb = _assign_cert_db(env_light, ub.uid, "cert_con_b")
     cc = _assign_cert_db(env_light, uc.uid, "cert_con_c")
 
-    # Mỗi luồng dùng một client đăng nhập độc lập
+    # Mỗi luồng dùng một client đăng nhập độc lập và PIN riêng của từng người
     ub_t = env_light.login("con_b", "Str0ng-Passw0rd-Ok", ub.secret)
     uc_t = env_light.login("con_c", "Str0ng-Passw0rd-Ok", uc.secret)
 
@@ -315,13 +316,13 @@ def test_w2_concurrent_parallel_signing_preserves_both_signatures(env_light, mon
 
     barrier = threading.Barrier(2)
 
-    def _call(api_client, cert_id, box, reason):
+    def _call(api_client, cert_id, pin, box, reason):
         barrier.wait(timeout=5)
-        return api_client.post(f"/api/documents/{doc_id}/sign", json=_sign_body(cert_id, box=box, reason=reason))
+        return api_client.post(f"/api/documents/{doc_id}/sign", json=_sign_body(cert_id, pin=pin, box=box, reason=reason))
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        f1 = pool.submit(_call, ub_t, cb, [40, 40, 240, 100], "B ký song song")
-        f2 = pool.submit(_call, uc_t, cc, [300, 40, 500, 100], "C ký song song")
+        f1 = pool.submit(_call, ub_t, cb, "371946", [40, 40, 240, 100], "B ký song song")
+        f2 = pool.submit(_call, uc_t, cc, "482615", [300, 40, 500, 100], "C ký song song")
         r1, r2 = f1.result(timeout=15), f2.result(timeout=15)
 
     assert r1.status_code == 200, r1.text
@@ -513,10 +514,10 @@ def test_w2_e2e_4_signers_real_pyhanko_and_concurrency(tmp_path):
 def _run_4_signer_real_pyhanko(env, pub_dir: str, *, level: str, verify_pdf, make_vc):
     env.register_certs("bob", "carol", "dave", "frank")
 
-    ua = env.make_user("wf_e2e_a", cert_keys=["bob"])
-    ub = env.make_user("wf_e2e_b", cert_keys=["carol"])
-    uc = env.make_user("wf_e2e_c", cert_keys=["dave"])
-    ud = env.make_user("wf_e2e_d", cert_keys=["frank"])
+    ua = env.make_user("wf_e2e_a", cert_keys=["bob"], pin="258419")
+    ub = env.make_user("wf_e2e_b", cert_keys=["carol"], pin="371946")
+    uc = env.make_user("wf_e2e_c", cert_keys=["dave"], pin="482615")
+    ud = env.make_user("wf_e2e_d", cert_keys=["frank"], pin="593728")
 
     up = ua.post("/api/files", files={"file": ("hop-dong.pdf", read("sample.pdf"), "application/pdf")})
     assert up.status_code == 201, up.text
@@ -532,12 +533,12 @@ def _run_4_signer_real_pyhanko(env, pub_dir: str, *, level: str, verify_pdf, mak
 
     # A ký bước 1 và assign cho B & C song song (all)
     r_a = ua.post(f"/api/documents/{doc_id}/sign", json=_sign_body(
-        env.certs["bob"], page=1, box=[30, 40, 260, 110], reason="A trình duyệt", level=level,
+        env.certs["bob"], pin=ua.pin, page=1, box=[30, 40, 260, 110], reason="A trình duyệt", level=level,
         next_action="assign", next_assignee_ids=[ub.uid, uc.uid], next_mode="all",
     ))
     assert r_a.status_code == 200, r_a.text
 
-    # B & C ký gần như đồng thời ở bước 2 (hai vị trí khác nhau)
+    # B & C ký gần như đồng thời ở bước 2 (hai vị trí khác nhau, mỗi người dùng PIN riêng)
     ub_t = env.login("wf_e2e_b", "Str0ng-Passw0rd-Ok", ub.secret)
     uc_t = env.login("wf_e2e_c", "Str0ng-Passw0rd-Ok", uc.secret)
     barrier = threading.Barrier(2)
@@ -548,10 +549,10 @@ def _run_4_signer_real_pyhanko(env, pub_dir: str, *, level: str, verify_pdf, mak
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         fb = pool.submit(_par_sign, ub_t, _sign_body(
-            env.certs["carol"], page=1, box=[310, 40, 550, 110], reason="B kiểm tra", level=level,
+            env.certs["carol"], pin=ub.pin, page=1, box=[310, 40, 550, 110], reason="B kiểm tra", level=level,
         ))
         fc = pool.submit(_par_sign, uc_t, _sign_body(
-            env.certs["dave"], mode="both", image_id=img_id, page=2, box=[30, 40, 280, 120],
+            env.certs["dave"], pin=uc.pin, mode="both", image_id=img_id, page=2, box=[30, 40, 280, 120],
             reason="C đồng ý", level=level,
         ))
         rb, rc = fb.result(timeout=60), fc.result(timeout=60)
@@ -567,7 +568,7 @@ def _run_4_signer_real_pyhanko(env, pub_dir: str, *, level: str, verify_pdf, mak
 
     # D ký bước 3 và hoàn tất
     rd = ud.post(f"/api/documents/{doc_id}/sign", json=_sign_body(
-        env.certs["frank"], page=-1, box=[310, 40, 550, 110], reason="D ký ban hành",
+        env.certs["frank"], pin=ud.pin, page=-1, box=[310, 40, 550, 110], reason="D ký ban hành",
         level=level, next_action="complete",
     ))
     assert rd.status_code == 200, rd.text

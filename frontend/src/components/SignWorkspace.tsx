@@ -1,13 +1,16 @@
 import React, { useEffect, useState } from "react";
 import {
+  ApiError,
   apiBytes,
   apiJson,
   type CertificateItem,
+  type MeResponse,
   type PresetItem,
   type StoredFile,
 } from "../lib/api";
 import type { PdfBox } from "../lib/coords";
 import { PdfPreviewBox } from "./PdfPreviewBox";
+import { PinModal } from "./PinModal";
 
 type ShowField = "name" | "title" | "date" | "location" | "reason";
 const ALL_SHOW: { key: ShowField; label: string }[] = [
@@ -19,11 +22,14 @@ const ALL_SHOW: { key: ShowField; label: string }[] = [
 ];
 
 interface Props {
+  me: MeResponse;
   initialFile?: StoredFile | null;
   onGoVerify: (fileId: string) => void;
+  onGoAccount: () => void;
+  onRefreshMe: () => Promise<void> | void;
 }
 
-export function SignWorkspace({ initialFile = null, onGoVerify }: Props) {
+export function SignWorkspace({ me, initialFile = null, onGoVerify, onGoAccount, onRefreshMe }: Props) {
   const [files, setFiles] = useState<StoredFile[]>([]);
   const [selectedFile, setSelectedFile] = useState<StoredFile | null>(null);
   const [pdfBytes, setPdfBytes] = useState<Uint8Array | null>(null);
@@ -48,6 +54,9 @@ export function SignWorkspace({ initialFile = null, onGoVerify }: Props) {
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
   const [signedFile, setSignedFile] = useState<StoredFile | null>(null);
+  const [pinOpen, setPinOpen] = useState(false);
+  const [pinErr, setPinErr] = useState("");
+  const [pinErrKind, setPinErrKind] = useState<string | undefined>(undefined);
 
   async function refreshLists() {
     const [fList, cList, pList] = await Promise.all([
@@ -196,10 +205,21 @@ export function SignWorkspace({ initialFile = null, onGoVerify }: Props) {
     }
   }
 
-  async function handleSign() {
+  function handleSign() {
     if (!selectedFile || certId === "") return;
     setErr("");
     setMsg("");
+    setPinErr(me.pin_locked ? "Chức năng ký đang tạm khóa do nhập sai PIN quá nhiều lần." : "");
+    setPinErrKind(me.has_signing_pin ? (me.pin_locked ? "pin_locked" : undefined) : "pin_not_set");
+    setPinOpen(true);
+  }
+
+  async function submitSignWithPin(pin: string) {
+    if (!selectedFile || certId === "") return;
+    setErr("");
+    setMsg("");
+    setPinErr("");
+    setPinErrKind(undefined);
     setBusy(true);
     try {
       const res = await apiJson<{ job_id: number; output_file: StoredFile }>("/api/sign", {
@@ -216,14 +236,25 @@ export function SignWorkspace({ initialFile = null, onGoVerify }: Props) {
           title: title || null,
           show,
           level,
+          pin,
         }),
       });
+      setPinOpen(false);
       setSignedFile(res.output_file);
       await refreshLists();
       await selectAndLoadFile(res.output_file);
       setMsg("Ký số thành công! Có thể tải về hoặc ký nối tiếp thêm chữ ký.");
     } catch (ex) {
-      setErr(ex instanceof Error ? ex.message : "Ký số thất bại");
+      if (ex instanceof ApiError && ex.pinError) {
+        setPinErr(ex.message);
+        setPinErrKind(ex.pinError);
+        if (ex.pinError === "pin_locked" || ex.pinError === "pin_not_set") {
+          await onRefreshMe();
+        }
+      } else {
+        setPinOpen(false);
+        setErr(ex instanceof Error ? ex.message : "Ký số thất bại");
+      }
     } finally {
       setBusy(false);
     }
@@ -456,6 +487,18 @@ export function SignWorkspace({ initialFile = null, onGoVerify }: Props) {
           imagePreviewUrl={imagePreviewUrl}
         />
       </div>
+      <PinModal
+        open={pinOpen}
+        title="Xác thực PIN để ký tài liệu"
+        description={`Tài liệu: ${selectedFile?.name || ""}`}
+        busy={busy}
+        error={pinErr}
+        pinErrorKind={pinErrKind}
+        hasSigningPin={me.has_signing_pin}
+        onClose={() => setPinOpen(false)}
+        onConfirm={submitSignWithPin}
+        onGoSettings={onGoAccount}
+      />
     </div>
   );
 }

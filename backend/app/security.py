@@ -40,6 +40,34 @@ def check_password_policy(password: str, min_len: int) -> Optional[str]:
     return None
 
 
+_WEAK_SIGNING_PINS = {
+    "159753", "147258", "258369", "963852", "741852", "852963",
+    "000001", "100000", "102030", "111222", "222333", "123654", "654123",
+    "123321", "654456",
+}
+
+
+def check_signing_pin_policy(pin: Optional[str], password_hash: Optional[str] = None) -> Optional[str]:
+    """Kiểm tra chính sách PIN ký 6 chữ số: không quá yếu, không lặp/liên tiếp, không trùng mật khẩu."""
+    if not isinstance(pin, str) or not re.fullmatch(r"[0-9]{6}", pin):
+        return "Mã PIN ký phải gồm đúng 6 chữ số"
+    if len(set(pin)) == 1:
+        return "Mã PIN quá đơn giản (không được dùng 6 chữ số giống nhau)"
+    digits = [int(c) for c in pin]
+    diffs = [(digits[i + 1] - digits[i]) % 10 for i in range(5)]
+    if all(d == 1 for d in diffs) or all(d == 9 for d in diffs):
+        return "Mã PIN quá đơn giản (không được dùng dãy số liên tiếp)"
+    if pin[:2] * 3 == pin or pin[:3] * 2 == pin or (pin[0] == pin[1] and pin[2] == pin[3] and pin[4] == pin[5]):
+        return "Mã PIN quá đơn giản (không được dùng mẫu số lặp)"
+    if pin[:3] == pin[5:2:-1] and all((digits[i + 1] - digits[i]) % 10 in (1, 9) for i in range(2)):
+        return "Mã PIN quá đơn giản (không được dùng chuỗi đối xứng liên tiếp)"
+    if pin in _WEAK_SIGNING_PINS:
+        return "Mã PIN quá phổ biến, vui lòng chọn PIN khác"
+    if password_hash and verify_password(password_hash, pin):
+        return "Mã PIN không được trùng mật khẩu đăng nhập"
+    return None
+
+
 class SecretBox:
     """Mã hóa secret TOTP khi lưu (Fernet); khóa lấy từ env/secret, không nằm trong DB."""
 

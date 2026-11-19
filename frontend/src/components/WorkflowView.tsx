@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import {
+  ApiError,
   apiBytes,
   apiJson,
   type AssignableUser,
@@ -15,6 +16,7 @@ import {
 } from "../lib/api";
 import type { PdfBox } from "../lib/coords";
 import { PdfPreviewBox } from "./PdfPreviewBox";
+import { PinModal } from "./PinModal";
 import { DOC_STATUS_MAP, WorkflowTimeline } from "./WorkflowTimeline";
 
 type ShowField = "name" | "title" | "date" | "location" | "reason";
@@ -68,9 +70,11 @@ interface Props {
   resetSignal?: number;
   onDocOpened: () => void;
   onNotifyRefresh: () => void;
+  onGoAccount: () => void;
+  onRefreshMe: () => Promise<void> | void;
 }
 
-export function WorkflowView({ me, openDocId, resetSignal = 0, onDocOpened, onNotifyRefresh }: Props) {
+export function WorkflowView({ me, openDocId, resetSignal = 0, onDocOpened, onNotifyRefresh, onGoAccount, onRefreshMe }: Props) {
   const [view, setView] = useState<"list" | "create" | "detail">("list");
   const [scope, setScope] = useState<"pending" | "created" | "participated" | "all">("pending");
   const [statusFilter, setStatusFilter] = useState("");
@@ -120,6 +124,9 @@ export function WorkflowView({ me, openDocId, resetSignal = 0, onDocOpened, onNo
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
+  const [pinAction, setPinAction] = useState<"sign" | "reject" | "cancel" | null>(null);
+  const [pinErr, setPinErr] = useState("");
+  const [pinErrKind, setPinErrKind] = useState<string | undefined>(undefined);
 
   async function loadList(curScope = scope, curStatus = statusFilter) {
     const qs = new URLSearchParams({ scope: curScope });
@@ -299,45 +306,107 @@ export function WorkflowView({ me, openDocId, resetSignal = 0, onDocOpened, onNo
     if (c.cert_id && certs.some((x) => x.id === c.cert_id)) setCertId(c.cert_id);
   }
 
-  async function handleSign() {
+  function openPinPrompt(action: "sign" | "reject" | "cancel") {
+    setErr("");
+    setMsg("");
+    setPinErr(me.pin_locked ? "Chức năng ký đang tạm khóa do nhập sai PIN quá nhiều lần." : "");
+    setPinErrKind(me.has_signing_pin ? (me.pin_locked ? "pin_locked" : undefined) : "pin_not_set");
+    setPinAction(action);
+  }
+
+  function handleSign() {
     if (!detail || certId === "") return;
     if (postSignAction === "assign" && postAssignees.length === 0) {
       setErr("Vui lòng chọn người ký tiếp theo hoặc chọn ký trước");
       return;
     }
+    openPinPrompt("sign");
+  }
+
+  function handleReject() {
+    if (!detail) return;
+    if (!rejectReason.trim()) {
+      setErr("Bắt buộc phải nhập lý do từ chối");
+      return;
+    }
+    openPinPrompt("reject");
+  }
+
+  function handleCancel() {
+    if (!detail) return;
+    openPinPrompt("cancel");
+  }
+
+  async function handlePinConfirm(pin: string) {
+    if (!detail || !pinAction) return;
     setErr("");
     setMsg("");
+    setPinErr("");
+    setPinErrKind(undefined);
     setBusy(true);
     try {
-      const payload: Record<string, unknown> = {
-        cert_id: Number(certId),
-        mode: signMode,
-        image_id: signMode === "text" ? null : imageId,
-        page,
-        box,
-        reason: reason || null,
-        location: location || null,
-        title: sigTitle || null,
-        show,
-        level,
-      };
-      if (detail.can_decide_next_on_sign && postSignAction !== "later") {
-        payload.next_action = postSignAction;
-        if (postSignAction === "assign") {
-          payload.next_assignee_ids = postAssignees;
-          payload.next_mode = postMode;
+      if (pinAction === "sign") {
+        const payload: Record<string, unknown> = {
+          cert_id: Number(certId),
+          mode: signMode,
+          image_id: signMode === "text" ? null : imageId,
+          page,
+          box,
+          reason: reason || null,
+          location: location || null,
+          title: sigTitle || null,
+          show,
+          level,
+          pin,
+        };
+        if (detail.can_decide_next_on_sign && postSignAction !== "later") {
+          payload.next_action = postSignAction;
+          if (postSignAction === "assign") {
+            payload.next_assignee_ids = postAssignees;
+            payload.next_mode = postMode;
+          }
         }
+        await apiJson(`/api/documents/${detail.id}/sign`, {
+          method: "POST",
+          body: JSON.stringify(payload),
+        });
+        setPinAction(null);
+        await openDetail(detail.id, false);
+        await loadList(scope, statusFilter);
+        onNotifyRefresh();
+        setMsg("Đã ký tài liệu thành công");
+      } else if (pinAction === "reject") {
+        await apiJson(`/api/documents/${detail.id}/reject`, {
+          method: "POST",
+          body: JSON.stringify({ reason: rejectReason.trim(), pin }),
+        });
+        setPinAction(null);
+        await openDetail(detail.id, false);
+        await loadList(scope, statusFilter);
+        onNotifyRefresh();
+        setMsg("Đã từ chối ký và dừng luồng");
+      } else if (pinAction === "cancel") {
+        await apiJson(`/api/documents/${detail.id}/cancel`, {
+          method: "POST",
+          body: JSON.stringify({ reason: cancelReason.trim(), pin }),
+        });
+        setPinAction(null);
+        await openDetail(detail.id, false);
+        await loadList(scope, statusFilter);
+        onNotifyRefresh();
+        setMsg("Đã hủy luồng ký");
       }
-      await apiJson(`/api/documents/${detail.id}/sign`, {
-        method: "POST",
-        body: JSON.stringify(payload),
-      });
-      await openDetail(detail.id, false);
-      await loadList(scope, statusFilter);
-      onNotifyRefresh();
-      setMsg("Đã ký tài liệu thành công");
     } catch (ex) {
-      setErr(ex instanceof Error ? ex.message : "Ký tài liệu thất bại");
+      if (ex instanceof ApiError && ex.pinError) {
+        setPinErr(ex.message);
+        setPinErrKind(ex.pinError);
+        if (ex.pinError === "pin_locked" || ex.pinError === "pin_not_set") {
+          await onRefreshMe();
+        }
+      } else {
+        setPinAction(null);
+        setErr(ex instanceof Error ? ex.message : "Thao tác thất bại");
+      }
     } finally {
       setBusy(false);
     }
@@ -385,51 +454,7 @@ export function WorkflowView({ me, openDocId, resetSignal = 0, onDocOpened, onNo
     }
   }
 
-  async function handleReject() {
-    if (!detail) return;
-    if (!rejectReason.trim()) {
-      setErr("Bắt buộc phải nhập lý do từ chối");
-      return;
-    }
-    setErr("");
-    setMsg("");
-    setBusy(true);
-    try {
-      await apiJson(`/api/documents/${detail.id}/reject`, {
-        method: "POST",
-        body: JSON.stringify({ reason: rejectReason.trim() }),
-      });
-      await openDetail(detail.id, false);
-      await loadList(scope, statusFilter);
-      onNotifyRefresh();
-      setMsg("Đã từ chối ký và dừng luồng");
-    } catch (ex) {
-      setErr(ex instanceof Error ? ex.message : "Từ chối thất bại");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function handleCancel() {
-    if (!detail) return;
-    setErr("");
-    setMsg("");
-    setBusy(true);
-    try {
-      await apiJson(`/api/documents/${detail.id}/cancel`, {
-        method: "POST",
-        body: JSON.stringify({ reason: cancelReason.trim() }),
-      });
-      await openDetail(detail.id, false);
-      await loadList(scope, statusFilter);
-      onNotifyRefresh();
-      setMsg("Đã hủy luồng ký");
-    } catch (ex) {
-      setErr(ex instanceof Error ? ex.message : "Hủy luồng thất bại");
-    } finally {
-      setBusy(false);
-    }
-  }
+  // handleReject & handleCancel đã gom vào handlePinConfirm ở trên
 
   async function handleVerify() {
     if (!detail) return;
@@ -925,6 +950,24 @@ export function WorkflowView({ me, openDocId, resetSignal = 0, onDocOpened, onNo
         </div>
 
         <WorkflowTimeline detail={detail} events={timelineEvents} />
+        <PinModal
+          open={pinAction !== null}
+          title={
+            pinAction === "reject"
+              ? "Xác thực PIN để từ chối ký"
+              : pinAction === "cancel"
+                ? "Xác thực PIN để hủy luồng ký"
+                : "Xác thực PIN để ký tài liệu"
+          }
+          description={`Tài liệu: ${detail.title}`}
+          busy={busy}
+          error={pinErr}
+          pinErrorKind={pinErrKind}
+          hasSigningPin={me.has_signing_pin}
+          onClose={() => setPinAction(null)}
+          onConfirm={handlePinConfirm}
+          onGoSettings={onGoAccount}
+        />
       </div>
     );
   }

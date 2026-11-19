@@ -8,6 +8,7 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt \
 WORKDIR /app
 COPY signer/esign_core.py signer/service.py /app/
 COPY signer/fonts /app/fonts
+RUN chmod -R a+rX /app
 
 USER 10002:10002
 EXPOSE 9000

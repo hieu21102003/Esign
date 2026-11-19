@@ -10,6 +10,7 @@ WORKDIR /app
 COPY backend/app /app/app
 # Dùng lại bộ kiểm tra Office của converter (chỉ thư viện chuẩn) để từ chối file độc hại trước khi gửi đi
 COPY converter/worker.py /app/vendor/worker.py
+RUN chmod -R a+rX /app
 
 ENV DATA_DIR=/data
 USER 10004:10004

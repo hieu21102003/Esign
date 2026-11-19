@@ -9,6 +9,7 @@ import io
 import os
 import subprocess
 import tempfile
+import time
 
 import httpx
 import pyotp
@@ -16,7 +17,7 @@ import pytest
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import ArrayObject, NameObject, NumberObject
 
-from conftest import ROOT, TEST_DATA, USER_PASS
+from conftest import ROOT, TEST_DATA, TEST_SIGN_PIN, USER_PASS
 
 WEB_URL = os.environ.get("WEB_LIVE_URL", "")
 LIVE_ADMIN_USER = os.environ.get("LIVE_ADMIN_USER", "admin")
@@ -195,6 +196,20 @@ def test_playwright_e2e_and_coordinates():
         page.get_by_role("button", name="Đã lưu, vào hệ thống").click()
         page.get_by_test_id("sign-btn").wait_for(state="visible")
 
+        # Đặt mã PIN ký 6 chữ số trong tab Tài khoản (yêu cầu mã TOTP)
+        page.get_by_test_id("tab-account").click()
+        for offset in (30, 60, 0):
+            page.get_by_test_id("account-pin-new").fill(TEST_SIGN_PIN)
+            page.get_by_test_id("account-pin-confirm").fill(TEST_SIGN_PIN)
+            page.get_by_test_id("account-pin-mfa").fill(pyotp.TOTP(secret).at(time.time() + offset))
+            with page.expect_response(lambda res: res.url.endswith("/api/auth/signing-pin") and res.request.method == "POST") as pr:
+                page.get_by_test_id("account-pin-submit").click()
+            if pr.value.status == 200:
+                break
+        page.get_by_test_id("pin-settings-ok").wait_for(state="visible")
+        page.get_by_test_id("tab-sign").click()
+        page.get_by_test_id("sign-btn").wait_for(state="visible")
+
         # Kiểm tra không lưu gì trong localStorage / sessionStorage
         assert page.evaluate("() => localStorage.length + sessionStorage.length") == 0
 
@@ -214,6 +229,11 @@ def test_playwright_e2e_and_coordinates():
 
         _drag_sig_box(page, 0.85, 0.85, resize_dx=20, resize_dy=10)
         page.get_by_test_id("sign-btn").click()
+        page.get_by_test_id("pin-modal-input").wait_for(state="visible")
+        page.get_by_test_id("pin-modal-input").fill(TEST_SIGN_PIN)
+        with page.expect_response(lambda res: res.url.endswith("/api/sign") and res.status == 200):
+            page.get_by_test_id("pin-modal-input").press("Enter")
+        page.get_by_test_id("pin-modal").wait_for(state="detached")
         dl_link = page.get_by_test_id("download-signed-link")
         dl_link.wait_for(state="visible", timeout=30000)
 
@@ -258,9 +278,13 @@ def test_playwright_e2e_and_coordinates():
                 f"() => document.querySelector('[data-testid=\"page-indicator\"]')?.textContent?.includes('Trang {pg} /')"
             )
             px_box = _drag_sig_box(page, rx, ry)
+            page.get_by_test_id("sign-btn").click()
+            page.get_by_test_id("pin-modal-input").wait_for(state="visible")
+            page.get_by_test_id("pin-modal-input").fill(TEST_SIGN_PIN)
             with page.expect_response(lambda res: res.url.endswith("/api/sign") and res.status == 200):
                 with page.expect_response(lambda res: "/download" in res.url and res.status == 200):
-                    page.get_by_test_id("sign-btn").click()
+                    page.get_by_test_id("pin-modal-input").press("Enter")
+            page.get_by_test_id("pin-modal").wait_for(state="detached")
             page.get_by_text("Ký số thành công!").wait_for(state="visible", timeout=20000)
             page.get_by_test_id("sig-box").wait_for(state="visible", timeout=20000)
             # Đọc file vừa ký qua download link (chứa bản mới nhất có thêm 1 chữ ký)

@@ -9,6 +9,7 @@ WORKDIR /app/pki
 # Dùng nguyên pki/tsa_server.py (không sửa): chỉ bọc để nghe 0.0.0.0 trong mạng nội bộ Compose
 COPY pki/tsa_server.py pki/openssl.cnf /app/pki/
 COPY deploy/tsa/run_tsa.py /app/run_tsa.py
+RUN chmod -R a+rX /app
 
 USER 10003:10003
 EXPOSE 8318

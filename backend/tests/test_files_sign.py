@@ -14,7 +14,7 @@ import pytest
 from pypdf import PdfReader, PdfWriter
 from sqlalchemy import text
 
-from conftest import ROOT, USER_PASS, TEST_DATA, need_env, read
+from conftest import ROOT, TEST_SIGN_PIN, USER_PASS, TEST_DATA, need_env, read
 from docx_factory import make_docx
 
 from esign_core import make_vc, verify_pdf  # noqa: E402  (signer/ đã được thêm vào sys.path)
@@ -26,7 +26,7 @@ def upload(api, name, data):
 
 def sign_body(file_id, cert_id, **kw):
     b = dict(file_id=file_id, cert_id=cert_id, mode="text", page=1, box=[300, 40, 560, 110],
-             reason="Đã duyệt nội dung", show=["name", "date", "reason"])
+             reason="Đã duyệt nội dung", show=["name", "date", "reason"], pin=TEST_SIGN_PIN)
     b.update(kw)
     return b
 
@@ -271,7 +271,7 @@ def test_audit_log_is_complete_append_only_and_has_no_secrets(env):
     assert s["file_sha256"] == hashlib.sha256(data).hexdigest() and s["output_sha256"]
     assert any(a["action"] == "login_failed" and a["username"] == "usera" for a in rows)
     dump = str(rows)
-    for secret in (USER_PASS, "mat-khau-sai-Xx1", u.secret, os.environ.get("P12_PASSPHRASE", "userpw")):
+    for secret in (USER_PASS, TEST_SIGN_PIN, "mat-khau-sai-Xx1", u.secret, os.environ.get("P12_PASSPHRASE", "userpw")):
         assert secret not in dump
     # API không có đường sửa/xóa audit
     for m in ("put", "delete", "post", "patch"):

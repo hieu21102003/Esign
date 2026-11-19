@@ -44,6 +44,9 @@ class Settings:
     cookie_secure: bool = True
     max_failed_logins: int = 5
     lockout_minutes: int = 15
+    pin_max_failed_attempts: int = 5
+    pin_fail_window_minutes: int = 10
+    pin_lockout_minutes: int = 15
     min_password_length: int = 10
     login_rate: tuple = (10, 60)      # (số lần, cửa sổ giây) theo IP và theo username
     sign_rate: tuple = (10, 60)       # theo user

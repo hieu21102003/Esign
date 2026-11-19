@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { AccountSettingsView } from "./components/AccountSettingsView";
 import { AdminView } from "./components/AdminView";
 import { DocumentsView } from "./components/DocumentsView";
 import { LoginView } from "./components/LoginView";
@@ -11,7 +12,7 @@ import { apiJson, setCsrfToken, type MeResponse, type StoredFile } from "./lib/a
 export function App() {
   const [me, setMe] = useState<MeResponse | null>(null);
   const [loading, setLoading] = useState(true);
-  const [tab, setTab] = useState<"sign" | "workflow" | "docs" | "verify" | "admin">("sign");
+  const [tab, setTab] = useState<"sign" | "workflow" | "docs" | "verify" | "account" | "admin">("sign");
   const [verifyFileId, setVerifyFileId] = useState<string | null>(null);
   const [openSignFile, setOpenSignFile] = useState<StoredFile | null>(null);
   const [openWorkflowDocId, setOpenWorkflowDocId] = useState<string | null>(null);
@@ -99,6 +100,14 @@ export function App() {
             >
               Xác minh
             </button>
+            <button
+              type="button"
+              className={`btn small ${tab === "account" ? "primary" : "ghost"}`}
+              onClick={() => setTab("account")}
+              data-testid="tab-account"
+            >
+              Tài khoản{!me.has_signing_pin ? " (!)" : ""}
+            </button>
             {me.role === "admin" && (
               <button
                 type="button"
@@ -129,11 +138,14 @@ export function App() {
       <main className="main-wrap">
         {tab === "sign" && (
           <SignWorkspace
+            me={me}
             initialFile={openSignFile}
             onGoVerify={(fid) => {
               setVerifyFileId(fid);
               setTab("verify");
             }}
+            onGoAccount={() => setTab("account")}
+            onRefreshMe={refreshMe}
           />
         )}
         {tab === "workflow" && (
@@ -143,6 +155,8 @@ export function App() {
             resetSignal={workflowResetTick}
             onDocOpened={() => setOpenWorkflowDocId(null)}
             onNotifyRefresh={() => setNotifTick((n) => n + 1)}
+            onGoAccount={() => setTab("account")}
+            onRefreshMe={refreshMe}
           />
         )}
         {tab === "docs" && (
@@ -158,6 +172,7 @@ export function App() {
           />
         )}
         {tab === "verify" && <VerifyView initialFileId={verifyFileId} />}
+        {tab === "account" && <AccountSettingsView me={me} onUpdated={refreshMe} />}
         {tab === "admin" && me.role === "admin" && <AdminView currentUserId={me.id} />}
       </main>
     </div>

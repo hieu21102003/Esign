@@ -4,7 +4,7 @@ from __future__ import annotations
 import pyotp
 from sqlalchemy import text
 
-from conftest import ADMIN_PASS, ADMIN_USER, USER_PASS, build_env
+from conftest import ADMIN_PASS, ADMIN_USER, TEST_SIGN_PIN, USER_PASS, build_env
 
 
 def test_password_hashed_argon2id_and_totp_secret_encrypted(env_light):
@@ -156,6 +156,6 @@ def test_session_rotates_after_mfa(env_light):
 def test_sign_rate_limit(tmp_path):
     e = build_env(tmp_path, with_services=False, sign_rate=(2, 60))
     u = e.make_user("alice")
-    body = {"file_id": "00000000-0000-4000-8000-000000000000", "cert_id": 1, "box": [10, 10, 200, 80]}
+    body = {"file_id": "00000000-0000-4000-8000-000000000000", "cert_id": 1, "box": [10, 10, 200, 80], "pin": TEST_SIGN_PIN}
     codes = [u.post("/api/sign", json=body).status_code for _ in range(4)]
     assert codes[:2] == [404, 404] and codes[2:] == [429, 429]

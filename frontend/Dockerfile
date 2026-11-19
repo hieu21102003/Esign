@@ -13,6 +13,7 @@ RUN rm -f /etc/nginx/conf.d/default.conf \
     && sed -i 's|/run/nginx.pid|/tmp/nginx.pid|' /etc/nginx/nginx.conf
 COPY frontend/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /app/dist /usr/share/nginx/html
+RUN chmod -R a+rX /usr/share/nginx/html /etc/nginx/conf.d
 USER nginx
 EXPOSE 8080
 CMD ["nginx", "-g", "daemon off;"]

@@ -12,7 +12,7 @@ import yaml
 from pypdf import PdfWriter
 from sqlalchemy import select
 
-from conftest import ROOT
+from conftest import ROOT, TEST_SIGN_PIN
 
 
 def _make_pdf() -> bytes:
@@ -55,6 +55,7 @@ def _sign_body(cert_id: int, **kw) -> dict:
     body = {
         "cert_id": cert_id, "mode": "text", "page": 1, "box": [40, 40, 240, 100],
         "reason": "Đồng ý", "show": ["name", "date", "reason"], "level": "B-T",
+        "pin": TEST_SIGN_PIN,
     }
     body.update(kw)
     return body
@@ -137,10 +138,10 @@ def test_w3_reject_stops_workflow_notifies_and_populates_timeline(env_light, mon
     assert ub.post(f"/api/documents/{doc_id}/sign", json=_sign_body(cb)).status_code == 200
 
     # Lý do từ chối rỗng -> 422
-    assert uc.post(f"/api/documents/{doc_id}/reject", json={"reason": "  \n "}).status_code == 422
+    assert uc.post(f"/api/documents/{doc_id}/reject", json={"reason": "  \n ", "pin": TEST_SIGN_PIN}).status_code == 422
 
     # C từ chối với lý do bắt buộc -> luồng dừng
-    rj = uc.post(f"/api/documents/{doc_id}/reject", json={"reason": "Sai số liệu phụ lục"})
+    rj = uc.post(f"/api/documents/{doc_id}/reject", json={"reason": "Sai số liệu phụ lục", "pin": TEST_SIGN_PIN})
     assert rj.status_code == 200, rj.text
     doc = rj.json()
     assert doc["status"] == "rejected" and doc["rejected_at"] is not None
@@ -153,7 +154,7 @@ def test_w3_reject_stops_workflow_notifies_and_populates_timeline(env_light, mon
     assert ub.post(f"/api/documents/{doc_id}/sign", json=_sign_body(cb)).status_code == 409
     assert uc.post(f"/api/documents/{doc_id}/assign", json={"assignee_ids": [ub.uid]}).status_code == 409
     assert uc.post(f"/api/documents/{doc_id}/complete").status_code == 409
-    assert ua.post(f"/api/documents/{doc_id}/cancel").status_code == 409
+    assert ua.post(f"/api/documents/{doc_id}/cancel", json={"pin": TEST_SIGN_PIN}).status_code == 409
 
     # A & B nhận thông báo từ chối
     na_kinds = [n["kind"] for n in ua.get("/api/notifications").json()["items"]]
@@ -185,11 +186,11 @@ def test_w3_cancel_permissions_and_notifications(env_light, monkeypatch):
     doc1 = ua.post("/api/documents", json={"file_id": fid1, "title": "Hủy luồng 1", "assignee_ids": [ub.uid]}).json()["id"]
 
     # Người được assign không phải người tạo không thể hủy (403); người ngoài -> 404
-    assert ub.post(f"/api/documents/{doc1}/cancel", json={"reason": "Không được"}).status_code == 403
-    assert ue.post(f"/api/documents/{doc1}/cancel").status_code == 404
+    assert ub.post(f"/api/documents/{doc1}/cancel", json={"reason": "Không được", "pin": TEST_SIGN_PIN}).status_code == 403
+    assert ue.post(f"/api/documents/{doc1}/cancel", json={"pin": TEST_SIGN_PIN}).status_code == 404
 
     # Người tạo hủy -> cancelled, B chuyển skipped và nhận notification
-    rc = ua.post(f"/api/documents/{doc1}/cancel", json={"reason": "Cập nhật nội dung mới"})
+    rc = ua.post(f"/api/documents/{doc1}/cancel", json={"reason": "Cập nhật nội dung mới", "pin": TEST_SIGN_PIN})
     assert rc.status_code == 200, rc.text
     d1 = rc.json()
     assert d1["status"] == "cancelled" and d1["cancel_reason"] == "Cập nhật nội dung mới"
@@ -201,12 +202,12 @@ def test_w3_cancel_permissions_and_notifications(env_light, monkeypatch):
     # Admin hủy được luồng của người khác; luồng đã hoàn tất không thể hủy
     fid2 = _upload_pdf(ua, "c2.pdf")
     doc2 = ua.post("/api/documents", json={"file_id": fid2, "title": "Hủy bởi admin", "assignee_ids": [ub.uid]}).json()["id"]
-    assert env_light.admin.post(f"/api/documents/{doc2}/cancel").status_code == 200
+    assert env_light.admin.post(f"/api/documents/{doc2}/cancel", json={"pin": TEST_SIGN_PIN}).status_code == 200
 
     fid3 = _upload_pdf(ua, "c3.pdf")
     doc3 = ua.post("/api/documents", json={"file_id": fid3, "title": "Đã hoàn tất", "assignee_ids": [ub.uid]}).json()["id"]
     assert ub.post(f"/api/documents/{doc3}/sign", json=_sign_body(cb, next_action="complete")).status_code == 200
-    assert ua.post(f"/api/documents/{doc3}/cancel").status_code == 409
+    assert ua.post(f"/api/documents/{doc3}/cancel", json={"pin": TEST_SIGN_PIN}).status_code == 409
 
 
 def test_w3_optional_smtp_noop_and_mocked_send_and_failure_safety(env_light, monkeypatch):

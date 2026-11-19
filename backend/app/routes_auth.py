@@ -11,8 +11,10 @@ from sqlalchemy import select
 from .audit import audit
 from .deps import COOKIE, Ctx, find_user, get_db, rate_limit, require_mfa, require_session, client_ip
 from .models import RecoveryCode, SessionRow, User, utcnow
-from .security import (DUMMY_HASH, check_password_policy, hash_password, new_recovery_codes, new_token,
-                       normalize_recovery, token_id, totp_check, totp_new_secret, totp_uri, verify_password)
+from .pin import now_from_request
+from .security import (DUMMY_HASH, check_password_policy, check_signing_pin_policy, hash_password,
+                       new_recovery_codes, new_token, normalize_recovery, token_id, totp_check,
+                       totp_new_secret, totp_uri, verify_password)
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -34,6 +36,23 @@ class VerifyIn(BaseModel):
 class PasswordIn(BaseModel):
     current_password: str = Field(max_length=256)
     new_password: str = Field(max_length=256)
+
+
+class SigningPinSetIn(BaseModel):
+    """Đặt/đổi PIN ký. Không dùng validator Pydantic để tránh lỗi 422 lộ ngược giá trị PIN."""
+    new_pin: Optional[str] = None
+    totp_code: Optional[str] = Field(None, max_length=16)
+    recovery_code: Optional[str] = Field(None, max_length=32)
+
+
+def _pin_status_out(u: User, now_dt) -> dict:
+    pin_locked = bool(u.pin_locked_until and u.pin_locked_until > now_dt)
+    return {
+        "has_signing_pin": bool(u.signing_pin_hash),
+        "pin_set_at": u.pin_set_at.isoformat() if u.pin_set_at else None,
+        "pin_locked": pin_locked,
+        "pin_locked_until": u.pin_locked_until.isoformat() if pin_locked and u.pin_locked_until else None,
+    }
 
 
 def _issue_session(request: Request, response: Response, db, user: User, mfa: bool) -> SessionRow:
@@ -93,11 +112,12 @@ def login(body: LoginIn, request: Request, response: Response, db=Depends(get_db
 
 
 @router.get("/me")
-def me(ctx: Ctx = Depends(require_session)):
+def me(request: Request, ctx: Ctx = Depends(require_session)):
     u = ctx.user
+    _, now_dt = now_from_request(request)
     return {"id": u.id, "username": u.username, "display_name": u.display_name, "role": u.role,
             "mfa_verified": ctx.sess.mfa_verified, "totp_enrolled": u.totp_enabled,
-            "csrf_token": ctx.sess.csrf_token}
+            "csrf_token": ctx.sess.csrf_token, **_pin_status_out(u, now_dt)}
 
 
 @router.post("/logout")
@@ -198,3 +218,72 @@ def change_password(body: PasswordIn, request: Request, ctx: Ctx = Depends(requi
     db.commit()
     audit(db, ctx.ip, "password_change", user=ctx.user)
     return {"ok": True}
+
+
+@router.get("/signing-pin")
+def get_signing_pin_status(request: Request, ctx: Ctx = Depends(require_mfa)):
+    _, now_dt = now_from_request(request)
+    return _pin_status_out(ctx.user, now_dt)
+
+
+@router.post("/signing-pin")
+def set_signing_pin(
+    body: SigningPinSetIn, request: Request, ctx: Ctx = Depends(require_mfa), db=Depends(get_db)
+):
+    """Đặt lần đầu / đổi / đặt lại PIN ký 6 chữ số. Bắt buộc xác nhận bằng TOTP hoặc recovery code."""
+    st = request.app.state.settings
+    u = db.get(User, ctx.user.id)
+    if u is None or not u.is_active:
+        raise HTTPException(401, "Phiên không hợp lệ")
+    rate_limit(request, "pin-set", str(u.id), st.login_rate)
+
+    if not u.totp_enabled or not u.totp_secret_enc:
+        raise HTTPException(409, "Tài khoản chưa kích hoạt TOTP 2FA")
+
+    totp_code = (body.totp_code or "").strip()
+    recovery_code = (body.recovery_code or "").strip()
+    if bool(totp_code) == bool(recovery_code):
+        raise HTTPException(400, "Cung cấp đúng một trong: mã TOTP hoặc mã khôi phục")
+
+    _check_locked(request, db, u, ctx.ip)
+    box = request.app.state.box
+    ok, used_recovery = False, False
+    if totp_code:
+        step = totp_check(box.decrypt(u.totp_secret_enc), totp_code, request.app.state.clock(), u.totp_last_step)
+        if step is not None:
+            u.totp_last_step, ok = step, True
+    else:
+        h = box.recovery_hash(recovery_code)
+        row = db.scalar(select(RecoveryCode).where(
+            RecoveryCode.user_id == u.id, RecoveryCode.code_hash == h, RecoveryCode.used_at.is_(None),
+        ))
+        if row is not None and len(normalize_recovery(recovery_code)) == 10:
+            row.used_at, ok, used_recovery = utcnow(), True, True
+
+    if not ok:
+        db.rollback()
+        _register_failure(db, st, u)
+        audit(db, ctx.ip, "pin_change_denied", user=u, status="denied", detail="bad_mfa")
+        raise HTTPException(401, "Mã TOTP hoặc mã khôi phục không đúng")
+
+    err = check_signing_pin_policy(body.new_pin, u.password_hash)
+    if err:
+        db.rollback()
+        raise HTTPException(400, err)
+
+    _, now_dt = now_from_request(request)
+    had_pin = bool(u.signing_pin_hash)
+    u.failed_attempts, u.locked_until = 0, None
+    u.signing_pin_hash = hash_password(body.new_pin)
+    u.pin_set_at = now_dt
+    if not (u.pin_locked_until and u.pin_locked_until > now_dt):
+        u.pin_failed_attempts = 0
+        u.pin_fail_times_json = "[]"
+        u.pin_locked_until = None
+
+    audit(
+        db, ctx.ip, "pin_change" if had_pin else "pin_set", user=u,
+        detail=f"via={'recovery' if used_recovery else 'totp'}", commit=False,
+    )
+    db.commit()
+    return {"ok": True, **_pin_status_out(u, now_dt)}

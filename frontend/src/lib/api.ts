@@ -10,11 +10,23 @@ export function setCsrfToken(tok: string): void {
   csrfToken = tok || "";
 }
 
+export interface ApiErrorMeta {
+  pinError?: string;
+  pinRemaining?: number;
+  retryAfter?: number;
+}
+
 export class ApiError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  pinError?: string;
+  pinRemaining?: number;
+  retryAfter?: number;
+  constructor(status: number, message: string, meta: ApiErrorMeta = {}) {
     super(message);
     this.status = status;
+    this.pinError = meta.pinError;
+    this.pinRemaining = meta.pinRemaining;
+    this.retryAfter = meta.retryAfter;
   }
 }
 
@@ -40,7 +52,12 @@ async function request(path: string, init: RequestInit = {}): Promise<Response> 
     } catch {
       // ignore non-json
     }
-    throw new ApiError(res.status, msg);
+    const pinError = res.headers.get("X-Pin-Error") || undefined;
+    const remRaw = res.headers.get("X-Pin-Remaining");
+    const raRaw = res.headers.get("Retry-After");
+    const pinRemaining = remRaw !== null && /^\d+$/.test(remRaw) ? Number(remRaw) : undefined;
+    const retryAfter = raRaw !== null && /^\d+$/.test(raRaw) ? Number(raRaw) : undefined;
+    throw new ApiError(res.status, msg, { pinError, pinRemaining, retryAfter });
   }
   return res;
 }
@@ -67,6 +84,10 @@ export interface MeResponse {
   mfa_verified: boolean;
   totp_enrolled: boolean;
   csrf_token: string;
+  has_signing_pin: boolean;
+  pin_set_at: string | null;
+  pin_locked: boolean;
+  pin_locked_until: string | null;
 }
 
 export interface StoredFile {

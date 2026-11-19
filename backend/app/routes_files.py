@@ -15,6 +15,7 @@ from sqlalchemy import select
 from .audit import audit
 from .deps import Ctx, client_ip, get_db, rate_limit, require_mfa
 from .models import Certificate, SignJob, SignaturePreset, StoredFile, UserCertificate, utcnow
+from .pin import verify_signing_pin
 from .services import (ServiceError, b64, convert_office, display_name, file_ext, inspect_pdf,
                        normalize_pdf_if_hybrid, signer_sign, signer_verify, validate_image, ALLOWED_EXTS)
 from .storage import get_file, read_bytes, remove_from_disk, store_bytes
@@ -167,6 +168,7 @@ class SignParams(BaseModel):
     title: Optional[str] = Field(None, max_length=200)
     show: List[Literal["name", "title", "date", "location", "reason"]] = ["name", "date", "reason"]
     level: Literal["B-B", "B-T", "B-LT"] = "B-T"
+    pin: Optional[str] = None
 
     @field_validator("page")
     @classmethod
@@ -227,12 +229,13 @@ def sign(body: SignRequest, request: Request, ctx: Ctx = Depends(require_mfa), d
     """Ký PDF. Yêu cầu: phiên hợp lệ + đã qua 2FA + là chủ file + chứng thư được admin gán cho người dùng."""
     st = request.app.state.settings
     rate_limit(request, "sign", str(ctx.user.id), st.sign_rate)
+    verify_signing_pin(db, request, ctx, body.pin, action="sign", file_id=body.file_id)
     f = get_file(db, ctx, body.file_id, owner_only=True, kinds=("upload", "signed"))
     if f.is_workflow:
         raise HTTPException(409, "File thuộc luồng ký, vui lòng ký trong màn hình Luồng ký")
     cert, pdf, info, img = validate_sign_inputs(db, st, ctx, body, f)
 
-    params = body.model_dump(exclude={"file_id", "cert_id"})
+    params = body.model_dump(exclude={"file_id", "cert_id", "pin"})
     job = SignJob(user_id=ctx.user.id, input_file_id=f.id, cert_id=cert.id, params_json=json.dumps(params))
     db.add(job)
     db.commit()

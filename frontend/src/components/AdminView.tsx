@@ -10,6 +10,9 @@ interface AdminUser {
   is_active: boolean;
   totp_enabled: boolean;
   locked: boolean;
+  has_signing_pin?: boolean;
+  pin_locked?: boolean;
+  pin_locked_until?: string | null;
   cert_refs?: string[];
 }
 
@@ -222,6 +225,21 @@ export function AdminView({ currentUserId }: { currentUserId?: number } = {}) {
     }
   }
 
+  async function unlockUserPin(u: AdminUser) {
+    setErr("");
+    setMsg("");
+    setBusy(true);
+    try {
+      await apiJson(`/api/admin/users/${u.id}/unlock-pin`, { method: "POST" });
+      setMsg(`Đã mở khóa PIN ký cho "${u.username}"`);
+      await loadAll();
+    } catch (ex) {
+      setErr(ex instanceof Error ? ex.message : "Mở khóa PIN thất bại");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function deleteUser(u: AdminUser) {
     const extra =
       u.cert_refs && u.cert_refs.length > 0
@@ -378,7 +396,12 @@ export function AdminView({ currentUserId }: { currentUserId?: number } = {}) {
                 </td>
                 <td>{u.role}</td>
                 <td>{u.totp_enabled ? "Bật" : "Chưa"}</td>
-                <td>{u.is_active ? (u.locked ? "Đang khóa" : "Hoạt động") : "Vô hiệu"}</td>
+                <td>
+                  <div>{u.is_active ? (u.locked ? "Đang khóa" : "Hoạt động") : "Vô hiệu"}</div>
+                  <div className="muted">
+                    PIN: {u.pin_locked ? "Đang khóa" : u.has_signing_pin ? "Đã đặt" : "Chưa đặt"}
+                  </div>
+                </td>
                 <td className="row wrap">
                   {caEnabled && (
                     <button
@@ -399,6 +422,17 @@ export function AdminView({ currentUserId }: { currentUserId?: number } = {}) {
                   {u.locked && (
                     <button type="button" className="btn tiny" onClick={() => apiJson(`/api/admin/users/${u.id}/unlock`, { method: "POST" }).then(loadAll)}>
                       Mở khóa
+                    </button>
+                  )}
+                  {u.pin_locked && (
+                    <button
+                      type="button"
+                      className="btn tiny primary"
+                      disabled={busy}
+                      onClick={() => unlockUserPin(u)}
+                      data-testid={`admin-unlock-pin-${u.username}`}
+                    >
+                      Mở khóa PIN
                     </button>
                   )}
                   {u.id !== currentUserId && (

@@ -93,6 +93,7 @@ unset APW
 
 chmod 700 secrets
 chmod 400 secrets/*
+umask 022  # khôi phục umask mặc định để git pull về sau không tạo file quyền 600
 
 # Phân quyền đúng theo UID từng container (ca=10005, signer=10002, api=10004, postgres=70):
 sudo chown 10005:10005 secrets/int_passphrase

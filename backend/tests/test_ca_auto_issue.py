@@ -11,7 +11,7 @@ import httpx
 import pytest
 from pypdf import PdfWriter
 
-from conftest import ROOT, USER_PASS, build_env
+from conftest import ROOT, TEST_SIGN_PIN, USER_PASS, build_env
 
 
 def _load_ca_module():
@@ -272,10 +272,11 @@ def test_ca_and_signer_live_e2e_issue_sign_revoke(tmp_path):
     cert = r_create.json()["certificate"]
 
     u = env.enroll("ca_e2e_u1", USER_PASS)
+    env.set_pin(u, TEST_SIGN_PIN)
     fid = u.post("/api/files", files={"file": ("auto.pdf", _make_pdf(), "application/pdf")}).json()["id"]
     rs = u.post("/api/sign", json={
         "file_id": fid, "cert_id": cert["id"], "mode": "text", "page": 1,
-        "box": [40, 40, 260, 110], "reason": "Ký bằng cert tự động cấp",
+        "box": [40, 40, 260, 110], "reason": "Ký bằng cert tự động cấp", "pin": TEST_SIGN_PIN,
     })
     assert rs.status_code == 200, rs.text
     out_id = rs.json()["output_file"]["id"]
@@ -288,5 +289,6 @@ def test_ca_and_signer_live_e2e_issue_sign_revoke(tmp_path):
     assert ver2["all_ok"] is False
     rs_blocked = u.post("/api/sign", json={
         "file_id": fid, "cert_id": cert["id"], "mode": "text", "page": 1, "box": [40, 40, 260, 110],
+        "pin": TEST_SIGN_PIN,
     })
     assert rs_blocked.status_code in (400, 403)

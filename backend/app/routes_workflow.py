@@ -31,6 +31,7 @@ from .models import (
     utcnow,
 )
 from .notifications import dispatch_emails, notify_users
+from .pin import verify_signing_pin
 from .routes_files import SignParams, validate_sign_inputs
 from .services import ServiceError, b64, inspect_pdf, signer_sign, signer_verify
 from .storage import get_file, read_bytes, remove_from_disk, store_bytes
@@ -94,6 +95,7 @@ class DocumentSignIn(SignParams):
 
 class RejectIn(BaseModel):
     reason: str = Field(min_length=1, max_length=500)
+    pin: Optional[str] = None
 
     @field_validator("reason")
     @classmethod
@@ -106,6 +108,7 @@ class RejectIn(BaseModel):
 
 class CancelIn(BaseModel):
     reason: str = Field("", max_length=500)
+    pin: Optional[str] = None
 
     @field_validator("reason")
     @classmethod
@@ -603,6 +606,7 @@ def sign_document(
     st = request.app.state.settings
     rate_limit(request, "sign", str(ctx.user.id), st.sign_rate)
     _validate_uuid(doc_id)
+    verify_signing_pin(db, request, ctx, body.pin, action="doc_sign", document_id=doc_id)
     uid, ip = ctx.user.id, ctx.ip
 
     with _doc_lock(doc_id):
@@ -629,7 +633,7 @@ def sign_document(
         actor_ctx = Ctx(user=actor, sess=ctx.sess, ip=ip)
         cert, pdf, info, img = validate_sign_inputs(db, st, actor_ctx, body, cur_file, document_id=doc.id)
 
-        params = body.model_dump(exclude={"cert_id", "next_action", "next_assignee_ids", "next_mode"})
+        params = body.model_dump(exclude={"cert_id", "pin", "next_action", "next_assignee_ids", "next_mode"})
         payload = {
             "key_ref": cert.key_ref, "pdf_b64": b64(pdf), "image_b64": b64(img),
             "mode": body.mode, "page": body.page, "box": body.box,
@@ -833,6 +837,7 @@ def reject_document(
 ):
     st = request.app.state.settings
     _validate_uuid(doc_id)
+    verify_signing_pin(db, request, ctx, body.pin, action="doc_reject", document_id=doc_id)
     uid, ip = ctx.user.id, ctx.ip
 
     with _doc_lock(doc_id):
@@ -882,6 +887,7 @@ def cancel_document(
 ):
     st = request.app.state.settings
     _validate_uuid(doc_id)
+    verify_signing_pin(db, request, ctx, body.pin if body else None, action="doc_cancel", document_id=doc_id)
     uid, ip = ctx.user.id, ctx.ip
     reason = body.reason if body else ""
 

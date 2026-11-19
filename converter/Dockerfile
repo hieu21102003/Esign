@@ -23,12 +23,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY signer/fonts/NotoSans-Regular.ttf /usr/local/share/fonts/NotoSans-Regular.ttf
-RUN fc-cache -f -v \
+RUN chmod 644 /usr/local/share/fonts/NotoSans-Regular.ttf \
+    && fc-cache -f -v \
     && groupadd -g 10001 converter \
     && useradd -u 10001 -g 10001 -d /tmp -s /usr/sbin/nologin converter
 
 WORKDIR /app
 COPY converter/worker.py converter/server.py /app/
+RUN chmod -R a+rX /app
 
 USER 10001:10001
 ENTRYPOINT ["python3", "/app/worker.py"]

@@ -36,6 +36,11 @@ class User(Base):
     totp_last_step: Mapped[int] = mapped_column(Integer, default=0)  # chống replay mã TOTP
     failed_attempts: Mapped[int] = mapped_column(Integer, default=0)
     locked_until: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    signing_pin_hash: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    pin_set_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    pin_failed_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    pin_fail_times_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    pin_locked_until: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
@@ -261,8 +266,19 @@ def migrate_db(engine) -> None:
     tables = set(insp.get_table_names())
     cols = {t: {c["name"] for c in insp.get_columns(t)} for t in tables}
     stmts = []
-    if "users" in tables and "email" not in cols["users"]:
-        stmts.append("ALTER TABLE users ADD COLUMN email VARCHAR(255)")
+    if "users" in tables:
+        if "email" not in cols["users"]:
+            stmts.append("ALTER TABLE users ADD COLUMN email VARCHAR(255)")
+        if "signing_pin_hash" not in cols["users"]:
+            stmts.append("ALTER TABLE users ADD COLUMN signing_pin_hash VARCHAR(255)")
+        if "pin_set_at" not in cols["users"]:
+            stmts.append("ALTER TABLE users ADD COLUMN pin_set_at TIMESTAMP")
+        if "pin_failed_attempts" not in cols["users"]:
+            stmts.append("ALTER TABLE users ADD COLUMN pin_failed_attempts INTEGER NOT NULL DEFAULT 0")
+        if "pin_fail_times_json" not in cols["users"]:
+            stmts.append("ALTER TABLE users ADD COLUMN pin_fail_times_json TEXT")
+        if "pin_locked_until" not in cols["users"]:
+            stmts.append("ALTER TABLE users ADD COLUMN pin_locked_until TIMESTAMP")
     if "files" in tables and "is_workflow" not in cols["files"]:
         stmts.append("ALTER TABLE files ADD COLUMN is_workflow BOOLEAN NOT NULL DEFAULT FALSE")
     if "audit_logs" in tables:

@@ -21,6 +21,7 @@ from app.main import create_app  # noqa: E402
 TEST_DATA = os.path.join(ROOT, "test-data")
 ADMIN_USER, ADMIN_PASS = "admin", "Adm1n-Pass-Strong"
 USER_PASS = "Str0ng-Passw0rd-Ok"
+TEST_SIGN_PIN = "258419"
 
 
 def need_env(*names):
@@ -108,7 +109,19 @@ class Env:
         api.csrf, api.secret = r.json()["csrf_token"], secret
         return api
 
-    def make_user(self, username, role="user", cert_keys=()):
+    def set_pin(self, api, pin: str = TEST_SIGN_PIN, *, use_recovery: bool = False):
+        payload = {"new_pin": pin}
+        if use_recovery:
+            payload["recovery_code"] = api.recovery.pop()
+        else:
+            self.clock.advance()
+            payload["totp_code"] = pyotp.TOTP(api.secret).at(self.clock.t)
+        r = api.post("/api/auth/signing-pin", json=payload)
+        assert r.status_code == 200, r.text
+        api.pin = pin
+        return r.json()
+
+    def make_user(self, username, role="user", cert_keys=(), pin: str | None = TEST_SIGN_PIN):
         r = self.admin.post("/api/admin/users", json={"username": username, "password": USER_PASS,
                                                       "display_name": username.title(), "role": role})
         assert r.status_code == 201, r.text
@@ -118,6 +131,10 @@ class Env:
             assert self.admin.put(f"/api/admin/users/{uid}/certificates", json={"cert_ids": ids}).status_code == 200
         api = self.enroll(username, USER_PASS)
         api.uid = uid
+        if pin is not None:
+            self.set_pin(api, pin)
+        else:
+            api.pin = None
         return api
 
     def register_certs(self, *key_refs):
@@ -146,6 +163,7 @@ def build_env(tmp_path, with_services=True, **over):
     app.state.clock = clock
     env = Env(app, clock)
     env.admin = env.enroll(ADMIN_USER, ADMIN_PASS)
+    env.set_pin(env.admin, TEST_SIGN_PIN)
     return env
 
 

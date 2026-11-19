@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends bash openssl \
 WORKDIR /app
 COPY ca/service.py /app/service.py
 COPY pki/ca.sh pki/openssl.cnf /app/pki/
-RUN chmod 755 /app/pki/ca.sh
+RUN chmod -R a+rX /app && chmod 755 /app/pki/ca.sh
 
 USER 10005:10002
 EXPOSE 9001

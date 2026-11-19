@@ -11,6 +11,7 @@ from sqlalchemy import delete, desc, select
 
 from .audit import audit
 from .deps import Ctx, get_db, require_admin
+from .pin import now_from_request
 from .models import (
     AuditLog,
     Certificate,
@@ -98,10 +99,15 @@ class AssignIn(BaseModel):
     cert_ids: List[int] = Field(max_length=200)
 
 
-def _user_out(u: User, cert_refs: Optional[List[str]] = None) -> dict:
+def _user_out(u: User, cert_refs: Optional[List[str]] = None, now=None) -> dict:
+    cur = now or utcnow()
+    pin_locked = bool(u.pin_locked_until and u.pin_locked_until > cur)
     return {"id": u.id, "username": u.username, "display_name": u.display_name, "email": u.email, "role": u.role,
             "is_active": u.is_active, "totp_enabled": u.totp_enabled,
-            "locked": bool(u.locked_until and u.locked_until > utcnow()),
+            "locked": bool(u.locked_until and u.locked_until > cur),
+            "has_signing_pin": bool(u.signing_pin_hash),
+            "pin_locked": pin_locked,
+            "pin_locked_until": u.pin_locked_until.isoformat() if pin_locked and u.pin_locked_until else None,
             "created_at": u.created_at.isoformat(),
             "cert_refs": cert_refs if cert_refs is not None else []}
 
@@ -166,7 +172,7 @@ def create_user(body: UserIn, request: Request, ctx: Ctx = Depends(require_admin
 
 
 @router.get("/users")
-def list_users(ctx: Ctx = Depends(require_admin), db=Depends(get_db)):
+def list_users(request: Request, ctx: Ctx = Depends(require_admin), db=Depends(get_db)):
     users = list(db.scalars(select(User).order_by(User.id)))
     refs_by_uid: dict[int, List[str]] = {}
     for uid, kref in db.execute(
@@ -176,7 +182,8 @@ def list_users(ctx: Ctx = Depends(require_admin), db=Depends(get_db)):
         .order_by(Certificate.id)
     ):
         refs_by_uid.setdefault(uid, []).append(kref)
-    return [_user_out(u, refs_by_uid.get(u.id, [])) for u in users]
+    _, now_dt = now_from_request(request)
+    return [_user_out(u, refs_by_uid.get(u.id, []), now=now_dt) for u in users]
 
 
 def _set_active(uid: int, active: bool, ctx: Ctx, db) -> dict:
@@ -205,8 +212,21 @@ def enable_user(uid: int, ctx: Ctx = Depends(require_admin), db=Depends(get_db))
 def unlock_user(uid: int, ctx: Ctx = Depends(require_admin), db=Depends(get_db)):
     u = _get_user(db, uid)
     u.locked_until, u.failed_attempts = None, 0
+    u.pin_locked_until, u.pin_failed_attempts, u.pin_fail_times_json = None, 0, "[]"
     db.commit()
     audit(db, ctx.ip, "user_unlock", user=ctx.user, detail=f"target={u.username}")
+    return _user_out(u)
+
+
+@router.post("/users/{uid}/unlock-pin")
+def unlock_user_pin(uid: int, ctx: Ctx = Depends(require_admin), db=Depends(get_db)):
+    """Mở khóa chức năng ký của người dùng bị khóa do nhập sai PIN nhiều lần."""
+    u = _get_user(db, uid)
+    u.pin_locked_until = None
+    u.pin_failed_attempts = 0
+    u.pin_fail_times_json = "[]"
+    db.commit()
+    audit(db, ctx.ip, "pin_unlock", user=ctx.user, detail=f"target={u.username}")
     return _user_out(u)
 
 
