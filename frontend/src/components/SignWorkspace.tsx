@@ -42,7 +42,7 @@ export function SignWorkspace({ me, initialFile = null, onGoVerify, onGoAccount,
   const [imageId, setImageId] = useState<string | null>(null);
   const [imagePreviewUrl, setImagePreviewUrl] = useState<string | null>(null);
   const [reason, setReason] = useState("");
-  const [title, setTitle] = useState("");
+  const [title, setTitle] = useState(me.job_title || "");
   const [location, setLocation] = useState("");
   const [show, setShow] = useState<ShowField[]>(["name", "date", "reason"]);
   const [level, setLevel] = useState<"B-B" | "B-T" | "B-LT">("B-T");
@@ -79,6 +79,33 @@ export function SignWorkspace({ me, initialFile = null, onGoVerify, onGoAccount,
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (!title && me.job_title) {
+      setTitle(me.job_title);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [me.job_title]);
+
+  useEffect(() => {
+    if (!me.signature_image_file_id || imageId) return;
+    let cancelled = false;
+    apiBytes(`/api/signature-images/${me.signature_image_file_id}`)
+      .then((bytes) => {
+        if (cancelled) return;
+        const url = URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: "image/png" }));
+        setImageId(me.signature_image_file_id);
+        setImagePreviewUrl((prev) => {
+          if (prev) URL.revokeObjectURL(prev);
+          return url;
+        });
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [me.signature_image_file_id]);
 
   useEffect(() => {
     if (initialFile) {

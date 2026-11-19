@@ -148,6 +148,14 @@ def upload_image(request: Request, file: UploadFile = File(...), ctx: Ctx = Depe
     return {"id": f.id, "size": f.size, "sha256": f.sha256}
 
 
+@router.get("/signature-images/{file_id}")
+def get_signature_image(file_id: str, request: Request, ctx: Ctx = Depends(require_mfa), db=Depends(get_db)):
+    f = get_file(db, ctx, file_id, owner_only=True, kinds=("image",))
+    data = read_bytes(request.app.state.settings, f)
+    media = "image/jpeg" if data[:3] == b"\xff\xd8\xff" else "image/png"
+    return Response(data, media_type=media, headers={"X-Content-Type-Options": "nosniff"})
+
+
 @router.get("/certificates")
 def my_certificates(ctx: Ctx = Depends(require_mfa), db=Depends(get_db)):
     """Chỉ các chứng thư admin đã gán cho tôi (và còn hiệu lực)."""

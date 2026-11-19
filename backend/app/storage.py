@@ -63,7 +63,10 @@ def get_file(db, ctx, file_id: str, *, owner_only: bool = False, kinds=None) -> 
     except ValueError:
         raise HTTPException(404, "Không tìm thấy file")
     f = db.get(StoredFile, file_id)
-    if f is None or f.deleted_at is not None or (not f.is_workflow and f.expires_at <= utcnow()):
+    if f is None or f.deleted_at is not None:
+        raise HTTPException(404, "Không tìm thấy file")
+    is_default_sig = f.id == getattr(ctx.user, "signature_image_file_id", None)
+    if not f.is_workflow and not is_default_sig and f.expires_at <= utcnow():
         raise HTTPException(404, "Không tìm thấy file")
     is_owner = f.owner_id == ctx.user.id
     if not is_owner and not (ctx.user.role == "admin" and not owner_only):

@@ -133,6 +133,7 @@ def test_w2_assignable_users_and_workflow_file_guards(env_light):
     assert "offuser" not in by_name
     assert by_name["alice"]["has_cert"] is True
     assert by_name["bob"]["has_cert"] is False
+    assert by_name["alice"]["job_title"] and by_name["alice"]["department"]
 
     fid = _upload_pdf(a, "to-trinh.pdf")
     assert any(f["id"] == fid for f in a.get("/api/files").json())

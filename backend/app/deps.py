@@ -11,6 +11,7 @@ from sqlalchemy import select
 
 from .models import SessionRow, User, utcnow
 from .security import token_id
+from .terms import load_terms
 
 COOKIE = "esign_sid"
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
@@ -102,10 +103,32 @@ def require_session(request: Request, db=Depends(get_db)) -> Ctx:
     return Ctx(user=user, sess=sess, ip=client_ip(request))
 
 
-def require_mfa(ctx: Ctx = Depends(require_session)) -> Ctx:
-    """Đã đăng nhập VÀ đã qua 2FA trong phiên này."""
+def user_needs_onboarding(user: User, settings) -> tuple[bool, bool]:
+    """Trả (cần_onboarding, chỉ_cần_xác_nhận_lại_điều_khoản)."""
+    current_ver = load_terms(settings)["version"]
+    if user.onboarding_completed_at is None:
+        return True, False
+    if user.accepted_terms_version != current_ver:
+        return True, True
+    return False, False
+
+
+def require_mfa_only(ctx: Ctx = Depends(require_session)) -> Ctx:
+    """Đã đăng nhập VÀ đã qua 2FA (dùng cho wizard onboarding trước khi vào app)."""
     if not ctx.sess.mfa_verified:
         raise HTTPException(403, "Cần xác thực 2FA")
+    return ctx
+
+
+def require_mfa(request: Request, ctx: Ctx = Depends(require_mfa_only)) -> Ctx:
+    """Đã qua 2FA VÀ đã hoàn tất onboarding + đồng ý phiên bản điều khoản hiện tại."""
+    needs, _ = user_needs_onboarding(ctx.user, request.app.state.settings)
+    if needs:
+        raise HTTPException(
+            403,
+            "Vui lòng hoàn tất kích hoạt tài khoản trước khi sử dụng hệ thống",
+            headers={"X-Onboarding-Required": "1"},
+        )
     return ctx
 
 

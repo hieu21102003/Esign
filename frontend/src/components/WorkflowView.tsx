@@ -56,7 +56,10 @@ function CertifiedAssigneePicker({ users, selectedIds, onToggle, testIdPrefix }:
           />
           <span>
             <strong>{u.display_name || u.username}</strong>{" "}
-            <small className="muted">(@{u.username})</small>
+            <small className="muted">
+              (@{u.username})
+              {(u.job_title || u.department) ? ` · ${[u.job_title, u.department].filter(Boolean).join(" / ")}` : ""}
+            </small>
           </span>
         </label>
       ))}
@@ -103,7 +106,7 @@ export function WorkflowView({ me, openDocId, resetSignal = 0, onDocOpened, onNo
   const [imageId, setImageId] = useState<string | null>(null);
   const [imagePreviewUrl, setImagePreviewUrl] = useState<string | null>(null);
   const [reason, setReason] = useState("");
-  const [sigTitle, setSigTitle] = useState("");
+  const [sigTitle, setSigTitle] = useState(me.job_title || "");
   const [location, setLocation] = useState("");
   const [show, setShow] = useState<ShowField[]>(["name", "date", "reason"]);
   const [level, setLevel] = useState<"B-B" | "B-T" | "B-LT">("B-T");
@@ -141,6 +144,33 @@ export function WorkflowView({ me, openDocId, resetSignal = 0, onDocOpened, onNo
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scope, statusFilter]);
+
+  useEffect(() => {
+    if (!sigTitle && me.job_title) {
+      setSigTitle(me.job_title);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [me.job_title]);
+
+  useEffect(() => {
+    if (!me.signature_image_file_id || imageId) return;
+    let cancelled = false;
+    apiBytes(`/api/signature-images/${me.signature_image_file_id}`)
+      .then((bytes) => {
+        if (cancelled) return;
+        const url = URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: "image/png" }));
+        setImageId(me.signature_image_file_id);
+        setImagePreviewUrl((prev) => {
+          if (prev) URL.revokeObjectURL(prev);
+          return url;
+        });
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [me.signature_image_file_id]);
 
   useEffect(() => {
     return () => {
@@ -1049,7 +1079,12 @@ export function WorkflowView({ me, openDocId, resetSignal = 0, onDocOpened, onNo
                       <div><span className="badge warn">Chờ chuyển tiếp / hoàn tất</span></div>
                     )}
                   </td>
-                  <td>{d.creator.display_name || d.creator.username}</td>
+                  <td>
+                    <div>{d.creator.display_name || d.creator.username}</div>
+                    {(d.creator.job_title || d.creator.department) && (
+                      <div className="muted">{[d.creator.job_title, d.creator.department].filter(Boolean).join(" · ")}</div>
+                    )}
+                  </td>
                   <td>Bước {d.current_step_order} / {d.total_steps}</td>
                   <td><span className={`badge ${stBadge.cls}`}>{stBadge.label}</span></td>
                   <td className="mono">{d.updated_at.slice(0, 16).replace("T", " ")}</td>

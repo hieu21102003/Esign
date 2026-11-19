@@ -128,6 +128,8 @@ def test_admin_auto_issue_on_user_create_and_existing_user_and_revoke(tmp_path, 
 
     # User thường không được gọi các API quản trị CA
     u_api = env.enroll("nguyenvana", USER_PASS)
+    u_api._username = "nguyenvana"
+    env.mark_onboarded(u_api, pin=TEST_SIGN_PIN)
     assert u_api.get("/api/admin/ca/status").status_code == 403
     assert u_api.post(f"/api/admin/users/{du['id']}/issue-certificate", json={}).status_code == 403
     assert u_api.post(f"/api/admin/certificates/{du['certificate']['id']}/revoke").status_code == 403
@@ -195,6 +197,7 @@ def test_admin_delete_user_and_lifecycle_controls(tmp_path, monkeypatch):
     clean_uid = r_clean.json()["id"]
     clean_cert_id = r_clean.json()["certificate"]["id"]
     u_clean = env.enroll("clean_user", USER_PASS)
+    env.mark_onboarded("clean_user")
 
     # Tạo history_user và upload 1 PDF để phát sinh dữ liệu lịch sử
     r_hist = env.admin.post(
@@ -204,6 +207,7 @@ def test_admin_delete_user_and_lifecycle_controls(tmp_path, monkeypatch):
     assert r_hist.status_code == 201, r_hist.text
     hist_uid = r_hist.json()["id"]
     u_hist = env.enroll("history_user", USER_PASS)
+    env.mark_onboarded("history_user")
     r_up = u_hist.post("/api/files", files={"file": ("doc.pdf", _make_pdf(), "application/pdf")})
     assert r_up.status_code in (200, 201), r_up.text
 
@@ -272,7 +276,8 @@ def test_ca_and_signer_live_e2e_issue_sign_revoke(tmp_path):
     cert = r_create.json()["certificate"]
 
     u = env.enroll("ca_e2e_u1", USER_PASS)
-    env.set_pin(u, TEST_SIGN_PIN)
+    u._username = "ca_e2e_u1"
+    env.mark_onboarded(u, pin=TEST_SIGN_PIN)
     fid = u.post("/api/files", files={"file": ("auto.pdf", _make_pdf(), "application/pdf")}).json()["id"]
     rs = u.post("/api/sign", json={
         "file_id": fid, "cert_id": cert["id"], "mode": "text", "page": 1,

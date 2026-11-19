@@ -27,6 +27,10 @@ function userLabel(u: UserBrief): string {
   return u.username ? `${u.display_name} (@${u.username})` : u.display_name;
 }
 
+function userRoleLine(u: UserBrief): string {
+  return [u.job_title, u.department].filter(Boolean).join(" · ");
+}
+
 function fmtTime(iso: string | null): string {
   return iso ? iso.slice(0, 19).replace("T", " ") : "";
 }
@@ -49,7 +53,8 @@ export function WorkflowTimeline({ detail, events }: Props) {
           </span>
         </div>
         <span className="muted">
-          Tạo bởi {userLabel(detail.creator)} · {fmtTime(detail.created_at)}
+          Tạo bởi {userLabel(detail.creator)}
+          {userRoleLine(detail.creator) ? ` (${userRoleLine(detail.creator)})` : ""} · {fmtTime(detail.created_at)}
         </span>
       </div>
 
@@ -95,6 +100,9 @@ export function WorkflowTimeline({ detail, events }: Props) {
                         <strong>{userLabel(a.user)}</strong>
                         <span className={`badge ${st.cls}`}>{st.label}</span>
                       </div>
+                      {userRoleLine(a.user) && (
+                        <div className="muted">{userRoleLine(a.user)}</div>
+                      )}
                       <div className="muted">Giao bởi: {assignerName}</div>
                       {a.signed_at && (
                         <div className="muted mono">Thời điểm: {fmtTime(a.signed_at)}</div>

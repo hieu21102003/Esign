@@ -6,6 +6,11 @@ interface AdminUser {
   username: string;
   display_name: string;
   email: string | null;
+  job_title?: string;
+  department?: string;
+  manager_name?: string;
+  onboarding_completed?: boolean;
+  accepted_terms_version?: string | null;
   role: "admin" | "user";
   is_active: boolean;
   totp_enabled: boolean;
@@ -240,6 +245,38 @@ export function AdminView({ currentUserId }: { currentUserId?: number } = {}) {
     }
   }
 
+  async function resetUserOnboarding(u: AdminUser) {
+    if (!window.confirm(`Reset onboarding của "${u.username}"? Người dùng sẽ phải thực hiện lại quy trình kích hoạt ở lần đăng nhập kế tiếp.`)) return;
+    setErr("");
+    setMsg("");
+    setBusy(true);
+    try {
+      await apiJson(`/api/admin/users/${u.id}/reset-onboarding`, { method: "POST" });
+      setMsg(`Đã reset onboarding của "${u.username}"`);
+      await loadAll();
+    } catch (ex) {
+      setErr(ex instanceof Error ? ex.message : "Reset onboarding thất bại");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function resetUserPin(u: AdminUser) {
+    if (!window.confirm(`Xóa mã PIN ký hiện tại của "${u.username}"? Người dùng sẽ không ký được cho tới khi đặt PIN mới.`)) return;
+    setErr("");
+    setMsg("");
+    setBusy(true);
+    try {
+      await apiJson(`/api/admin/users/${u.id}/reset-pin`, { method: "POST" });
+      setMsg(`Đã xóa PIN ký của "${u.username}"`);
+      await loadAll();
+    } catch (ex) {
+      setErr(ex instanceof Error ? ex.message : "Reset PIN thất bại");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function deleteUser(u: AdminUser) {
     const extra =
       u.cert_refs && u.cert_refs.length > 0
@@ -353,6 +390,9 @@ export function AdminView({ currentUserId }: { currentUserId?: number } = {}) {
                 <td>
                   <strong>{u.username}</strong>
                   {u.display_name && <div className="muted">{u.display_name}</div>}
+                  {(u.job_title || u.department) && (
+                    <div className="muted">{[u.job_title, u.department].filter(Boolean).join(" · ")}</div>
+                  )}
                 </td>
                 <td>
                   {editEmailUid === u.id ? (
@@ -400,6 +440,9 @@ export function AdminView({ currentUserId }: { currentUserId?: number } = {}) {
                   <div>{u.is_active ? (u.locked ? "Đang khóa" : "Hoạt động") : "Vô hiệu"}</div>
                   <div className="muted">
                     PIN: {u.pin_locked ? "Đang khóa" : u.has_signing_pin ? "Đã đặt" : "Chưa đặt"}
+                  </div>
+                  <div className="muted">
+                    Onboarding: {u.onboarding_completed ? "Đã xong" : "Chưa xong"}
                   </div>
                 </td>
                 <td className="row wrap">
@@ -469,6 +512,26 @@ export function AdminView({ currentUserId }: { currentUserId?: number } = {}) {
                           Reset 2FA
                         </button>
                       )}
+                      {u.has_signing_pin && (
+                        <button
+                          type="button"
+                          className="btn tiny"
+                          disabled={busy}
+                          onClick={() => resetUserPin(u)}
+                          data-testid={`admin-reset-pin-${u.username}`}
+                        >
+                          Reset PIN
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="btn tiny"
+                        disabled={busy}
+                        onClick={() => resetUserOnboarding(u)}
+                        data-testid={`admin-reset-onboarding-${u.username}`}
+                      >
+                        Reset onboarding
+                      </button>
                       <button
                         type="button"
                         className="btn tiny danger"

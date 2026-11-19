@@ -14,6 +14,8 @@ export interface ApiErrorMeta {
   pinError?: string;
   pinRemaining?: number;
   retryAfter?: number;
+  onboardingRequired?: boolean;
+  onboardingOtpRequired?: boolean;
 }
 
 export class ApiError extends Error {
@@ -21,12 +23,16 @@ export class ApiError extends Error {
   pinError?: string;
   pinRemaining?: number;
   retryAfter?: number;
+  onboardingRequired?: boolean;
+  onboardingOtpRequired?: boolean;
   constructor(status: number, message: string, meta: ApiErrorMeta = {}) {
     super(message);
     this.status = status;
     this.pinError = meta.pinError;
     this.pinRemaining = meta.pinRemaining;
     this.retryAfter = meta.retryAfter;
+    this.onboardingRequired = meta.onboardingRequired;
+    this.onboardingOtpRequired = meta.onboardingOtpRequired;
   }
 }
 
@@ -57,7 +63,15 @@ async function request(path: string, init: RequestInit = {}): Promise<Response> 
     const raRaw = res.headers.get("Retry-After");
     const pinRemaining = remRaw !== null && /^\d+$/.test(remRaw) ? Number(remRaw) : undefined;
     const retryAfter = raRaw !== null && /^\d+$/.test(raRaw) ? Number(raRaw) : undefined;
-    throw new ApiError(res.status, msg, { pinError, pinRemaining, retryAfter });
+    const onboardingRequired = res.headers.get("X-Onboarding-Required") === "1";
+    const onboardingOtpRequired = res.headers.get("X-Onboarding-Otp-Required") === "1";
+    throw new ApiError(res.status, msg, {
+      pinError,
+      pinRemaining,
+      retryAfter,
+      onboardingRequired,
+      onboardingOtpRequired,
+    });
   }
   return res;
 }
@@ -80,14 +94,72 @@ export interface MeResponse {
   id: number;
   username: string;
   display_name: string;
+  email: string | null;
+  job_title: string;
+  department: string;
+  manager_name: string;
+  manager_user_id: number | null;
+  signature_image_file_id: string | null;
   role: "admin" | "user";
   mfa_verified: boolean;
   totp_enrolled: boolean;
   csrf_token: string;
+  onboarding_completed: boolean;
+  onboarding_required: boolean;
+  terms_reaccept_only: boolean;
+  onboarding_step: number;
   has_signing_pin: boolean;
   pin_set_at: string | null;
   pin_locked: boolean;
   pin_locked_until: string | null;
+}
+
+export interface OnboardingProfile {
+  display_name: string;
+  job_title: string;
+  department: string;
+  manager_name: string;
+  manager_user_id: number | null;
+  email: string;
+}
+
+export interface OnboardingStatus {
+  onboarding_required: boolean;
+  terms_reaccept_only: boolean;
+  current_step: number;
+  saved_step: number;
+  onboarding_completed_at: string | null;
+  has_profile: boolean;
+  profile: OnboardingProfile;
+  terms_version: string;
+  terms_title: string;
+  terms_sha256: string;
+  accepted_terms_version: string | null;
+  terms_accepted: boolean;
+  otp_method: "totp" | "email_otp" | "none";
+  smtp_available: boolean;
+  has_signature_image: boolean;
+  signature_image_file_id: string | null;
+  has_signing_pin: boolean;
+  has_active_cert: boolean;
+  active_cert: { id: number; key_ref: string; serial: string; not_after: string } | null;
+  otp_reuse_valid: boolean;
+  otp_reuse_minutes: number;
+}
+
+export interface OnboardingTerms {
+  version: string;
+  title: string;
+  content: string;
+  sha256: string;
+}
+
+export interface ManagerSuggestion {
+  id: number;
+  username: string;
+  display_name: string;
+  job_title: string;
+  department: string;
 }
 
 export interface StoredFile {
@@ -145,12 +217,16 @@ export interface UserBrief {
   id: number | null;
   username: string;
   display_name: string;
+  job_title?: string;
+  department?: string;
 }
 
 export interface AssignableUser {
   id: number;
   username: string;
   display_name: string;
+  job_title?: string;
+  department?: string;
   has_cert: boolean;
 }
 

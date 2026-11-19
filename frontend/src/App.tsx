@@ -4,6 +4,7 @@ import { AdminView } from "./components/AdminView";
 import { DocumentsView } from "./components/DocumentsView";
 import { LoginView } from "./components/LoginView";
 import { NotificationBell } from "./components/NotificationBell";
+import { OnboardingWizard } from "./components/OnboardingWizard";
 import { SignWorkspace } from "./components/SignWorkspace";
 import { VerifyView } from "./components/VerifyView";
 import { WorkflowView } from "./components/WorkflowView";
@@ -53,6 +54,10 @@ export function App() {
   if (!me || !me.mfa_verified) {
     const initialStep = !me ? "login" : me.totp_enrolled ? "totp_verify" : "totp_setup";
     return <LoginView key={initialStep} initialStep={initialStep} onAuthed={refreshMe} />;
+  }
+
+  if (me.onboarding_required) {
+    return <OnboardingWizard me={me} onCompleted={refreshMe} onLogout={handleLogout} />;
   }
 
   return (
@@ -128,7 +133,11 @@ export function App() {
               setTab("workflow");
             }}
           />
-          <span className="muted">{me.display_name || me.username} ({me.role})</span>
+          <span className="muted" data-testid="topbar-user-info">
+            {me.display_name || me.username}
+            {(me.job_title || me.department) ? ` · ${[me.job_title, me.department].filter(Boolean).join(" / ")}` : ""}
+            {` (${me.role})`}
+          </span>
           <button type="button" className="btn small" onClick={handleLogout} data-testid="logout-btn">
             Đăng xuất
           </button>

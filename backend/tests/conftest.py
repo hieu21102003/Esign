@@ -121,7 +121,51 @@ class Env:
         api.pin = pin
         return r.json()
 
-    def make_user(self, username, role="user", cert_keys=(), pin: str | None = TEST_SIGN_PIN):
+    def mark_onboarded(
+        self,
+        api_or_username,
+        *,
+        job_title: str = "Chuyên viên",
+        department: str = "Phòng Kỹ thuật",
+        manager_name: str = "Quản lý Mẫu",
+        set_email: bool = False,
+        pin: str | None = None,
+    ):
+        from app.models import User, utcnow
+        from app.terms import load_terms
+
+        uname = api_or_username if isinstance(api_or_username, str) else getattr(api_or_username, "_username", None)
+        sf = self.app.state.session_factory
+        db = sf()
+        try:
+            u = db.scalar(select_user(uname)) if False else None
+            u = db.query(User).filter(User.username == uname).one()
+            if not u.job_title:
+                u.job_title = job_title
+            if not u.department:
+                u.department = department
+            if not u.manager_name:
+                u.manager_name = manager_name
+            if set_email and not u.email:
+                u.email = f"{uname}@example.local"
+            u.accepted_terms_version = load_terms(self.app.state.settings)["version"]
+            u.onboarding_step = 4
+            if u.onboarding_completed_at is None:
+                u.onboarding_completed_at = utcnow()
+            db.commit()
+        finally:
+            db.close()
+        if not isinstance(api_or_username, str) and pin is not None:
+            self.set_pin(api_or_username, pin)
+
+    def make_user(
+        self,
+        username,
+        role="user",
+        cert_keys=(),
+        pin: str | None = TEST_SIGN_PIN,
+        onboarded: bool = True,
+    ):
         r = self.admin.post("/api/admin/users", json={"username": username, "password": USER_PASS,
                                                       "display_name": username.title(), "role": role})
         assert r.status_code == 201, r.text
@@ -131,8 +175,9 @@ class Env:
             assert self.admin.put(f"/api/admin/users/{uid}/certificates", json={"cert_ids": ids}).status_code == 200
         api = self.enroll(username, USER_PASS)
         api.uid = uid
-        if pin is not None:
-            self.set_pin(api, pin)
+        api._username = username
+        if onboarded:
+            self.mark_onboarded(api, pin=pin)
         else:
             api.pin = None
         return api
@@ -163,7 +208,8 @@ def build_env(tmp_path, with_services=True, **over):
     app.state.clock = clock
     env = Env(app, clock)
     env.admin = env.enroll(ADMIN_USER, ADMIN_PASS)
-    env.set_pin(env.admin, TEST_SIGN_PIN)
+    env.admin._username = ADMIN_USER
+    env.mark_onboarded(env.admin, job_title="Quản trị hệ thống", department="CNTT", set_email=False, pin=TEST_SIGN_PIN)
     return env
 
 

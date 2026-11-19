@@ -38,9 +38,15 @@ def test_w1_new_tables_columns_constraints_and_cascade(tmp_path):
     init_db(eng)
     insp = inspect(eng)
     tables = set(insp.get_table_names())
-    assert {"documents", "workflow_steps", "step_assignees", "document_versions", "notifications"} <= tables
+    assert {"documents", "workflow_steps", "step_assignees", "document_versions", "notifications",
+            "terms_acceptances", "onboarding_otps"} <= tables
     user_cols = {c["name"] for c in insp.get_columns("users")}
-    assert {"email", "signing_pin_hash", "pin_set_at", "pin_failed_attempts", "pin_fail_times_json", "pin_locked_until"} <= user_cols
+    assert {
+        "email", "signing_pin_hash", "pin_set_at", "pin_failed_attempts", "pin_fail_times_json", "pin_locked_until",
+        "job_title", "department", "manager_name", "manager_user_id", "signature_image_file_id",
+        "onboarding_step", "onboarding_completed_at", "accepted_terms_version",
+        "onboarding_otp_verified_at", "onboarding_otp_session_id",
+    } <= user_cols
     assert "is_workflow" in {c["name"] for c in insp.get_columns("files")}
     audit_cols = {c["name"] for c in insp.get_columns("audit_logs")}
     assert {"document_id", "metadata_json"} <= audit_cols
@@ -210,9 +216,13 @@ def test_w1_idempotent_migration_from_legacy_db(tmp_path):
     init_db(eng)
 
     insp = inspect(eng)
-    assert {"documents", "workflow_steps", "step_assignees", "document_versions", "notifications"} <= set(
-        insp.get_table_names()
-    )
+    assert {"documents", "workflow_steps", "step_assignees", "document_versions", "notifications",
+            "terms_acceptances", "onboarding_otps"} <= set(insp.get_table_names())
+    migrated_user_cols = {c["name"] for c in insp.get_columns("users")}
+    assert {
+        "email", "signing_pin_hash", "job_title", "department", "manager_name",
+        "onboarding_step", "onboarding_completed_at", "accepted_terms_version",
+    } <= migrated_user_cols
     audit_idx = {ix["name"] for ix in insp.get_indexes("audit_logs")}
     assert "ix_audit_logs_document_id" in audit_idx
 
@@ -222,6 +232,7 @@ def test_w1_idempotent_migration_from_legacy_db(tmp_path):
         u = db.get(User, 1)
         assert u is not None and u.username == "legacy_user" and u.email is None and u.signing_pin_hash is None
         assert u.pin_failed_attempts == 0 and u.pin_locked_until is None
+        assert u.onboarding_completed_at is None and u.onboarding_step == 1
         f = db.get(StoredFile, fid)
         assert f is not None and f.is_workflow is False
         a = db.get(AuditLog, 1)

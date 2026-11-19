@@ -69,6 +69,11 @@ class Settings:
     smtp_pass: str = ""
     smtp_from: str = ""
     smtp_tls: bool = True
+    terms_file: str = ""
+    terms_version: str = ""
+    onboarding_otp_ttl_minutes: int = 5
+    onboarding_otp_reuse_minutes: int = 15
+    onboarding_otp_max_attempts: int = 5
 
     @property
     def upload_dir(self) -> str:
@@ -121,4 +126,6 @@ class Settings:
             smtp_pass=read_secret("SMTP_PASS"),
             smtp_from=os.environ.get("SMTP_FROM", "").strip(),
             smtp_tls=_bool("SMTP_TLS", True),
+            terms_file=os.environ.get("TERMS_FILE", "").strip(),
+            terms_version=os.environ.get("TERMS_VERSION", "").strip(),
         )

@@ -143,8 +143,14 @@ def _stakeholder_ids(
 
 def _user_brief(u: Optional[User], fallback_id: Optional[int] = None) -> dict:
     if u is None:
-        return {"id": fallback_id, "username": "", "display_name": ""}
-    return {"id": u.id, "username": u.username, "display_name": u.display_name}
+        return {"id": fallback_id, "username": "", "display_name": "", "job_title": "", "department": ""}
+    return {
+        "id": u.id,
+        "username": u.username,
+        "display_name": u.display_name,
+        "job_title": u.job_title or "",
+        "department": u.department or "",
+    }
 
 
 def _validate_uuid(doc_id: str) -> None:

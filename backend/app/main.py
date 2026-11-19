@@ -11,14 +11,20 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 
-from . import routes_admin, routes_auth, routes_files, routes_notifications, routes_workflow
+from . import routes_admin, routes_auth, routes_files, routes_notifications, routes_onboarding, routes_workflow
 from .cleanup import CleanupThread
 from .config import Settings
 from .models import User, init_db, make_engine, make_session_factory
 from .security import RateLimiter, SecretBox, check_password_policy, hash_password
 
 UNSAFE = {"POST", "PUT", "PATCH", "DELETE"}
-UPLOAD_PATHS = ("/api/files", "/api/verify", "/api/signature-images")
+UPLOAD_PATHS = (
+    "/api/files",
+    "/api/verify",
+    "/api/signature-images",
+    "/api/onboarding/signature-image/preview",
+    "/api/onboarding/signature-image/save",
+)
 SMALL_BODY = 1024 * 1024
 
 
@@ -100,6 +106,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         return resp
 
     app.include_router(routes_auth.router)
+    app.include_router(routes_onboarding.router)
     app.include_router(routes_admin.router)
     app.include_router(routes_files.router)
     app.include_router(routes_notifications.router)

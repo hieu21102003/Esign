@@ -9,10 +9,10 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from .audit import audit
-from .deps import COOKIE, Ctx, find_user, get_db, rate_limit, require_mfa, require_session, client_ip
+from .deps import COOKIE, Ctx, find_user, get_db, rate_limit, require_mfa, require_session, client_ip, user_needs_onboarding
 from .models import RecoveryCode, SessionRow, User, utcnow
-from .pin import now_from_request
-from .security import (DUMMY_HASH, check_password_policy, check_signing_pin_policy, hash_password,
+from .pin import apply_signing_pin, now_from_request
+from .security import (DUMMY_HASH, check_password_policy, hash_password,
                        new_recovery_codes, new_token, normalize_recovery, token_id, totp_check,
                        totp_new_secret, totp_uri, verify_password)
 
@@ -114,10 +114,29 @@ def login(body: LoginIn, request: Request, response: Response, db=Depends(get_db
 @router.get("/me")
 def me(request: Request, ctx: Ctx = Depends(require_session)):
     u = ctx.user
+    st = request.app.state.settings
     _, now_dt = now_from_request(request)
-    return {"id": u.id, "username": u.username, "display_name": u.display_name, "role": u.role,
-            "mfa_verified": ctx.sess.mfa_verified, "totp_enrolled": u.totp_enabled,
-            "csrf_token": ctx.sess.csrf_token, **_pin_status_out(u, now_dt)}
+    needs_onb, terms_reaccept_only = user_needs_onboarding(u, st)
+    return {
+        "id": u.id,
+        "username": u.username,
+        "display_name": u.display_name,
+        "email": u.email,
+        "job_title": u.job_title or "",
+        "department": u.department or "",
+        "manager_name": u.manager_name or "",
+        "manager_user_id": u.manager_user_id,
+        "signature_image_file_id": u.signature_image_file_id,
+        "role": u.role,
+        "mfa_verified": ctx.sess.mfa_verified,
+        "totp_enrolled": u.totp_enabled,
+        "csrf_token": ctx.sess.csrf_token,
+        "onboarding_completed": u.onboarding_completed_at is not None,
+        "onboarding_required": needs_onb if ctx.sess.mfa_verified else False,
+        "terms_reaccept_only": terms_reaccept_only if ctx.sess.mfa_verified else False,
+        "onboarding_step": u.onboarding_step or 1,
+        **_pin_status_out(u, now_dt),
+    }
 
 
 @router.post("/logout")
@@ -266,20 +285,13 @@ def set_signing_pin(
         audit(db, ctx.ip, "pin_change_denied", user=u, status="denied", detail="bad_mfa")
         raise HTTPException(401, "Mã TOTP hoặc mã khôi phục không đúng")
 
-    err = check_signing_pin_policy(body.new_pin, u.password_hash)
-    if err:
-        db.rollback()
-        raise HTTPException(400, err)
-
     _, now_dt = now_from_request(request)
-    had_pin = bool(u.signing_pin_hash)
+    try:
+        had_pin = apply_signing_pin(u, body.new_pin, now_dt)
+    except HTTPException:
+        db.rollback()
+        raise
     u.failed_attempts, u.locked_until = 0, None
-    u.signing_pin_hash = hash_password(body.new_pin)
-    u.pin_set_at = now_dt
-    if not (u.pin_locked_until and u.pin_locked_until > now_dt):
-        u.pin_failed_attempts = 0
-        u.pin_fail_times_json = "[]"
-        u.pin_locked_until = None
 
     audit(
         db, ctx.ip, "pin_change" if had_pin else "pin_set", user=u,

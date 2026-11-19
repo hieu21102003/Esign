@@ -59,6 +59,36 @@ def _provision_live_user(username: str) -> int:
             assert r2.status_code == 200, r2.text
             csrf = r2.json()["csrf_token"]
 
+        # Admin cũng phải hoàn tất onboarding 4 bước nếu chưa kích hoạt để gọi được /api/admin/*
+        me = c.get("/api/auth/me").json()
+        if me.get("onboarding_required"):
+            assert c.post("/api/onboarding/profile", json={
+                "display_name": "Quản trị viên",
+                "job_title": "Quản trị hệ thống",
+                "department": "CNTT",
+                "manager_name": "Ban Giám đốc",
+                "email": "admin.e2e@example.local",
+            }, headers={"X-CSRF-Token": csrf}).status_code == 200
+            terms = c.get("/api/onboarding/terms").json()
+            for off in (30, 60, 0):
+                ra = c.post("/api/onboarding/terms/accept", json={
+                    "terms_version": terms["version"], "scrolled_to_bottom": True, "agreed": True,
+                    "otp_code": pyotp.TOTP(sec).at(time.time() + off),
+                }, headers={"X-CSRF-Token": csrf})
+                if ra.status_code == 200:
+                    break
+            assert ra.status_code == 200, ra.text
+            with open(os.path.join(TEST_DATA, "sig.png"), "rb") as sf_fh:
+                rsig = c.post(
+                    "/api/onboarding/signature-image/save",
+                    files={"file": ("sig.png", sf_fh.read(), "image/png")},
+                    data={"remove_bg": "true", "sensitivity": "55", "rotate": "0"},
+                    headers={"X-CSRF-Token": csrf},
+                )
+            assert rsig.status_code == 200, rsig.text
+            rcomp = c.post("/api/onboarding/complete", json={"new_pin": TEST_SIGN_PIN}, headers={"X-CSRF-Token": csrf})
+            assert rcomp.status_code == 200, rcomp.text
+
         h = {"X-CSRF-Token": csrf}
         certs = c.get("/api/admin/certificates").json()
         carol = next((x for x in certs if x["key_ref"] == "carol"), None)
@@ -194,20 +224,41 @@ def test_playwright_e2e_and_coordinates():
         page.get_by_label("Mã 6 chữ số từ ứng dụng").fill(pyotp.TOTP(secret).now())
         page.get_by_role("button", name="Xác nhận kích hoạt 2FA").click()
         page.get_by_role("button", name="Đã lưu, vào hệ thống").click()
-        page.get_by_test_id("sign-btn").wait_for(state="visible")
 
-        # Đặt mã PIN ký 6 chữ số trong tab Tài khoản (yêu cầu mã TOTP)
-        page.get_by_test_id("tab-account").click()
-        for offset in (30, 60, 0):
-            page.get_by_test_id("account-pin-new").fill(TEST_SIGN_PIN)
-            page.get_by_test_id("account-pin-confirm").fill(TEST_SIGN_PIN)
-            page.get_by_test_id("account-pin-mfa").fill(pyotp.TOTP(secret).at(time.time() + offset))
-            with page.expect_response(lambda res: res.url.endswith("/api/auth/signing-pin") and res.request.method == "POST") as pr:
-                page.get_by_test_id("account-pin-submit").click()
+        # Hoàn tất Onboarding 4 bước toàn màn hình trên trình duyệt thật
+        page.get_by_test_id("onboarding-wizard").wait_for(state="visible")
+        page.get_by_test_id("onboarding-display-name").fill("Lê Văn E2E")
+        page.get_by_test_id("onboarding-email").fill("e2euser@example.local")
+        page.get_by_test_id("onboarding-job-title").fill("Chuyên viên E2E")
+        page.get_by_test_id("onboarding-department").fill("Phòng QA")
+        page.get_by_test_id("onboarding-manager-input").fill("Quản trị viên")
+        page.get_by_test_id("onboarding-step1-next").click()
+
+        page.get_by_test_id("onboarding-terms-box").wait_for(state="visible")
+        page.get_by_test_id("onboarding-terms-box").evaluate(
+            "el => { el.scrollTop = el.scrollHeight; el.dispatchEvent(new Event('scroll')); }"
+        )
+        page.get_by_test_id("onboarding-terms-agree").check()
+        for off in (30, 60, 0):
+            page.get_by_test_id("onboarding-terms-otp").fill(pyotp.TOTP(secret).at(time.time() + off))
+            with page.expect_response(lambda res: res.url.endswith("/api/onboarding/terms/accept") and res.request.method == "POST") as pr:
+                page.get_by_test_id("onboarding-terms-confirm").click()
             if pr.value.status == 200:
                 break
-        page.get_by_test_id("pin-settings-ok").wait_for(state="visible")
-        page.get_by_test_id("tab-sign").click()
+
+        page.get_by_test_id("onboarding-sig-file").wait_for(state="visible")
+        page.get_by_test_id("onboarding-sig-file").set_input_files(os.path.join(TEST_DATA, "sig.png"))
+        page.get_by_test_id("onboarding-sig-preview-img").wait_for(state="visible")
+        page.get_by_test_id("onboarding-sig-sample-box").wait_for(state="visible")
+        page.get_by_test_id("onboarding-sig-save").click()
+
+        page.get_by_test_id("onboarding-pin-new").wait_for(state="visible")
+        page.get_by_test_id("onboarding-otp-reused-notice").wait_for(state="visible")
+        page.get_by_test_id("onboarding-pin-new").fill(TEST_SIGN_PIN)
+        page.get_by_test_id("onboarding-pin-confirm").fill(TEST_SIGN_PIN)
+        page.get_by_test_id("onboarding-complete-btn").click()
+        page.get_by_test_id("onboarding-wizard").wait_for(state="detached", timeout=20000)
+
         page.get_by_test_id("sign-btn").wait_for(state="visible")
 
         # Kiểm tra không lưu gì trong localStorage / sessionStorage

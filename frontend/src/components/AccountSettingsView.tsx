@@ -93,7 +93,20 @@ export function AccountSettingsView({ me, onUpdated }: Props) {
   }
 
   return (
-    <div className="two-col" style={{ maxWidth: 960, margin: "0 auto", gap: 16, alignItems: "start" }}>
+    <div className="stack" style={{ maxWidth: 960, margin: "0 auto", gap: 16 }}>
+      <div className="card stack" data-testid="account-profile-card">
+        <h3>Hồ sơ cá nhân</h3>
+        <div className="two-col" style={{ gap: 10 }}>
+          <div><span className="muted">Họ tên:</span> <strong>{me.display_name || "-"}</strong></div>
+          <div><span className="muted">Email:</span> <strong>{me.email || "-"}</strong></div>
+          <div><span className="muted">Chức danh:</span> <strong>{me.job_title || "-"}</strong></div>
+          <div><span className="muted">Phòng ban:</span> <strong>{me.department || "-"}</strong></div>
+          <div><span className="muted">Quản lý trực tiếp:</span> <strong>{me.manager_name || "-"}</strong></div>
+          <div><span className="muted">Tên đăng nhập:</span> <strong className="mono">{me.username}</strong></div>
+        </div>
+      </div>
+
+      <div className="two-col" style={{ gap: 16, alignItems: "start" }}>
       <div className="card stack">
         <div className="preview-toolbar">
           <h3>Mã PIN ký số (6 chữ số)</h3>
@@ -229,6 +242,7 @@ export function AccountSettingsView({ me, onUpdated }: Props) {
           </button>
         </form>
       </div>
+    </div>
     </div>
   );
 }

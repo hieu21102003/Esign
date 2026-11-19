@@ -13,7 +13,7 @@ from sqlalchemy import select
 from .audit import audit
 from .deps import Ctx
 from .models import User
-from .security import DUMMY_HASH, verify_password
+from .security import DUMMY_HASH, check_signing_pin_policy, hash_password, verify_password
 
 _PIN_RE = re.compile(r"^[0-9]{6}$")
 _PIN_LOCKS_GUARD = threading.Lock()
@@ -35,6 +35,21 @@ def now_from_request(request: Request) -> tuple[float, datetime]:
     ts = float(clock()) if clock is not None else datetime.now(timezone.utc).timestamp()
     dt = datetime.fromtimestamp(ts, tz=timezone.utc).replace(tzinfo=None)
     return ts, dt
+
+
+def apply_signing_pin(u: User, new_pin: Optional[str], now_dt: datetime) -> bool:
+    """Kiểm tra chính sách và áp dụng hash PIN ký 6 chữ số lên đối tượng User (chưa commit)."""
+    err = check_signing_pin_policy(new_pin, u.password_hash)
+    if err:
+        raise HTTPException(400, err)
+    had_pin = bool(u.signing_pin_hash)
+    u.signing_pin_hash = hash_password(new_pin)
+    u.pin_set_at = now_dt
+    if not (u.pin_locked_until and u.pin_locked_until > now_dt):
+        u.pin_failed_attempts = 0
+        u.pin_fail_times_json = "[]"
+        u.pin_locked_until = None
+    return had_pin
 
 
 def verify_signing_pin(

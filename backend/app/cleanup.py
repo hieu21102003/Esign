@@ -9,7 +9,7 @@ from typing import Optional
 from sqlalchemy import delete, or_, select
 
 from .audit import audit
-from .models import Document, DocumentVersion, SessionRow, StepAssignee, StoredFile, WorkflowStep, utcnow
+from .models import Document, DocumentVersion, SessionRow, StepAssignee, StoredFile, User, WorkflowStep, utcnow
 from .storage import remove_from_disk
 
 log = logging.getLogger("esign.cleanup")
@@ -43,11 +43,18 @@ def purge_expired(settings, session_factory) -> int:
     db = session_factory()
     try:
         now = utcnow()
-        rows = list(db.scalars(select(StoredFile).where(
-            StoredFile.deleted_at.is_(None),
-            StoredFile.is_workflow.is_(False),
-            StoredFile.expires_at <= now,
-        )))
+        protected_sig_ids = set(
+            db.scalars(select(User.signature_image_file_id).where(User.signature_image_file_id.isnot(None)))
+        )
+        rows = [
+            f
+            for f in db.scalars(select(StoredFile).where(
+                StoredFile.deleted_at.is_(None),
+                StoredFile.is_workflow.is_(False),
+                StoredFile.expires_at <= now,
+            ))
+            if f.id not in protected_sig_ids
+        ]
         wf_days = getattr(settings, "workflow_retention_days", 0)
         if wf_days > 0:
             cutoff = now - timedelta(days=wf_days)

@@ -8,7 +8,7 @@ import httpx
 import pyotp
 import pytest
 
-from conftest import TEST_DATA, USER_PASS
+from conftest import TEST_DATA, TEST_SIGN_PIN, USER_PASS
 
 WEB_URL = os.environ.get("WEB_LIVE_URL", "")
 LIVE_ADMIN_USER = os.environ.get("LIVE_ADMIN_USER", "admin")
@@ -47,6 +47,35 @@ def _provision_workflow_users() -> dict[str, dict]:
             assert r2.status_code == 200, r2.text
             csrf = r2.json()["csrf_token"]
 
+        me = c.get("/api/auth/me").json()
+        if me.get("onboarding_required"):
+            assert c.post("/api/onboarding/profile", json={
+                "display_name": "Quản trị viên",
+                "job_title": "Quản trị hệ thống",
+                "department": "CNTT",
+                "manager_name": "Ban Giám đốc",
+                "email": "admin.wf@example.local",
+            }, headers={"X-CSRF-Token": csrf}).status_code == 200
+            terms = c.get("/api/onboarding/terms").json()
+            for off in (30, 60, 0):
+                ra = c.post("/api/onboarding/terms/accept", json={
+                    "terms_version": terms["version"], "scrolled_to_bottom": True, "agreed": True,
+                    "otp_code": pyotp.TOTP(sec).at(time.time() + off),
+                }, headers={"X-CSRF-Token": csrf})
+                if ra.status_code == 200:
+                    break
+            assert ra.status_code == 200, ra.text
+            with open(os.path.join(TEST_DATA, "sig.png"), "rb") as sf_fh:
+                rsig = c.post(
+                    "/api/onboarding/signature-image/save",
+                    files={"file": ("sig.png", sf_fh.read(), "image/png")},
+                    data={"remove_bg": "true", "sensitivity": "55", "rotate": "0"},
+                    headers={"X-CSRF-Token": csrf},
+                )
+            assert rsig.status_code == 200, rsig.text
+            rcomp = c.post("/api/onboarding/complete", json={"new_pin": TEST_SIGN_PIN}, headers={"X-CSRF-Token": csrf})
+            assert rcomp.status_code == 200, rcomp.text
+
         h = {"X-CSRF-Token": csrf}
         certs = c.get("/api/admin/certificates").json()
         by_ref = {x["key_ref"]: x for x in certs}
@@ -79,7 +108,7 @@ def _provision_workflow_users() -> dict[str, dict]:
         return out
 
 
-def _open_authed_page(browser, username: str, pin: str):
+def _open_authed_page(browser, username: str, display_name: str, job_title: str, department: str, pin: str):
     ctx = browser.new_context(viewport={"width": 1366, "height": 960}, accept_downloads=True)
     page = ctx.new_page()
     external_urls: list[str] = []
@@ -104,18 +133,41 @@ def _open_authed_page(browser, username: str, pin: str):
     page.get_by_label("Mã 6 chữ số từ ứng dụng").fill(pyotp.TOTP(secret).now())
     page.get_by_role("button", name="Xác nhận kích hoạt 2FA").click()
     page.get_by_role("button", name="Đã lưu, vào hệ thống").click()
-    page.get_by_test_id("tab-workflow").wait_for(state="visible")
 
-    page.get_by_test_id("tab-account").click()
+    # Thực hiện trọn vẹn wizard onboarding 4 bước trên trình duyệt
+    page.get_by_test_id("onboarding-wizard").wait_for(state="visible")
+    page.get_by_test_id("onboarding-display-name").fill(display_name)
+    page.get_by_test_id("onboarding-email").fill(f"{username}@example.local")
+    page.get_by_test_id("onboarding-job-title").fill(job_title)
+    page.get_by_test_id("onboarding-department").fill(department)
+    page.get_by_test_id("onboarding-manager-input").fill("Quản trị viên")
+    page.get_by_test_id("onboarding-step1-next").click()
+
+    page.get_by_test_id("onboarding-terms-box").wait_for(state="visible")
+    page.get_by_test_id("onboarding-terms-box").evaluate(
+        "el => { el.scrollTop = el.scrollHeight; el.dispatchEvent(new Event('scroll')); }"
+    )
+    page.get_by_test_id("onboarding-terms-agree").check()
     for offset in (30, 60, 0):
-        page.get_by_test_id("account-pin-new").fill(pin)
-        page.get_by_test_id("account-pin-confirm").fill(pin)
-        page.get_by_test_id("account-pin-mfa").fill(pyotp.TOTP(secret).at(time.time() + offset))
-        with page.expect_response(lambda r: r.url.endswith("/api/auth/signing-pin") and r.request.method == "POST") as pr:
-            page.get_by_test_id("account-pin-submit").click()
+        page.get_by_test_id("onboarding-terms-otp").fill(pyotp.TOTP(secret).at(time.time() + offset))
+        with page.expect_response(lambda r: r.url.endswith("/api/onboarding/terms/accept") and r.request.method == "POST") as pr:
+            page.get_by_test_id("onboarding-terms-confirm").click()
         if pr.value.status == 200:
             break
-    page.get_by_test_id("pin-settings-ok").wait_for(state="visible")
+
+    page.get_by_test_id("onboarding-sig-file").wait_for(state="visible")
+    page.get_by_test_id("onboarding-sig-file").set_input_files(os.path.join(TEST_DATA, "sig.png"))
+    page.get_by_test_id("onboarding-sig-preview-img").wait_for(state="visible")
+    page.get_by_test_id("onboarding-sig-save").click()
+
+    page.get_by_test_id("onboarding-pin-new").wait_for(state="visible")
+    page.get_by_test_id("onboarding-otp-reused-notice").wait_for(state="visible")
+    page.get_by_test_id("onboarding-pin-new").fill(pin)
+    page.get_by_test_id("onboarding-pin-confirm").fill(pin)
+    page.get_by_test_id("onboarding-complete-btn").click()
+    page.get_by_test_id("onboarding-wizard").wait_for(state="detached", timeout=20000)
+
+    page.get_by_test_id("tab-workflow").wait_for(state="visible")
     page.get_by_test_id("tab-workflow").click()
     page.get_by_test_id("wf-create-btn").wait_for(state="visible")
     assert page.evaluate("() => localStorage.length + sessionStorage.length") == 0
@@ -133,13 +185,13 @@ def wf_browser_sessions():
         browser = p.chromium.launch(headless=True)
         sessions = {}
         try:
-            for key, uname, pin in (
-                ("a", "pw_wf_a", "258419"),
-                ("b", "pw_wf_b", "371946"),
-                ("c", "pw_wf_c", "482615"),
-                ("d", "pw_wf_d", "593728"),
+            for key, uname, dname, jtitle, dept, pin in (
+                ("a", "pw_wf_a", "Nguyễn Văn A", "Chuyên viên", "Phòng Hành chính", "258419"),
+                ("b", "pw_wf_b", "Trần Thị B", "Trưởng nhóm", "Phòng Kinh doanh", "371946"),
+                ("c", "pw_wf_c", "Lê Văn C", "Phó phòng", "Phòng Tài chính", "482615"),
+                ("d", "pw_wf_d", "Đặng Thị D", "Giám đốc", "Ban Giám đốc", "593728"),
             ):
-                ctx, page, ext = _open_authed_page(browser, uname, pin)
+                ctx, page, ext = _open_authed_page(browser, uname, dname, jtitle, dept, pin)
                 sessions[key] = {"ctx": ctx, "page": page, "ext": ext, "username": uname, "pin": pin}
             yield sessions
             for s in sessions.values():
@@ -235,9 +287,10 @@ def test_pw_workflow_main_all_mode_and_timeline(wf_browser_sessions):
     _sign_in_ui(pd, pin_d, "D chốt ban hành", post_action="complete")
     expect(pd.get_by_test_id("wf-overall-status")).to_have_text("Hoàn tất", timeout=15000)
 
-    # Kiểm tra Timeline hiển thị đủ bước, người ký, nhận xét, chế độ ALL
+    # Kiểm tra Timeline hiển thị đủ bước, người ký, chức danh/phòng ban, nhận xét, chế độ ALL
     expect(pd.get_by_test_id("timeline-step-1-mode")).to_contain_text("Tất cả phải ký", timeout=15000)
     expect(pd.get_by_test_id("timeline-assignee-pw_wf_b")).to_contain_text("Đã ký", timeout=15000)
+    expect(pd.get_by_test_id("timeline-assignee-pw_wf_b")).to_contain_text("Phòng Kinh doanh", timeout=15000)
     expect(pd.get_by_test_id("timeline-assignee-pw_wf_b")).to_contain_text("B đã đồng ý", timeout=15000)
     expect(pd.get_by_test_id("timeline-assignee-pw_wf_c")).to_contain_text("Đã ký", timeout=15000)
     expect(pd.get_by_test_id("timeline-assignee-pw_wf_d")).to_contain_text("Đã ký", timeout=15000)

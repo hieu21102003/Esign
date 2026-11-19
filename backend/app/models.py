@@ -41,6 +41,19 @@ class User(Base):
     pin_failed_attempts: Mapped[int] = mapped_column(Integer, default=0)
     pin_fail_times_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     pin_locked_until: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    job_title: Mapped[str] = mapped_column(String(120), default="")
+    department: Mapped[str] = mapped_column(String(120), default="")
+    manager_name: Mapped[str] = mapped_column(String(120), default="")
+    manager_user_id: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    signature_image_file_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("files.id", ondelete="SET NULL", use_alter=True, name="fk_users_signature_image_file"),
+        nullable=True,
+    )
+    onboarding_step: Mapped[int] = mapped_column(Integer, default=1)
+    onboarding_completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    accepted_terms_version: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    onboarding_otp_verified_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    onboarding_otp_session_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
@@ -198,6 +211,33 @@ class Notification(Base):
     read_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
+class TermsAcceptance(Base):
+    """Bằng chứng đồng ý điều khoản cam kết sử dụng chữ ký số nội bộ."""
+    __tablename__ = "terms_acceptances"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    username: Mapped[str] = mapped_column(String(64), default="")
+    terms_version: Mapped[str] = mapped_column(String(64), index=True)
+    terms_sha256: Mapped[str] = mapped_column(String(64))
+    accepted_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    ip: Mapped[str] = mapped_column(String(64), default="")
+    user_agent: Mapped[str] = mapped_column(String(500), default="")
+    otp_method: Mapped[str] = mapped_column(String(24), default="totp")
+
+
+class OnboardingOtp(Base):
+    """Mã OTP dùng 1 lần gửi qua email khi xác nhận điều khoản (nếu chưa có TOTP)."""
+    __tablename__ = "onboarding_otps"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    purpose: Mapped[str] = mapped_column(String(32), default="terms_accept")
+    code_hash: Mapped[str] = mapped_column(String(64))
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    used_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class AuditLog(Base):
     """Chỉ ghi thêm. Không có API sửa/xóa; chặn thêm bằng ORM event + trigger DB."""
     __tablename__ = "audit_logs"
@@ -279,6 +319,26 @@ def migrate_db(engine) -> None:
             stmts.append("ALTER TABLE users ADD COLUMN pin_fail_times_json TEXT")
         if "pin_locked_until" not in cols["users"]:
             stmts.append("ALTER TABLE users ADD COLUMN pin_locked_until TIMESTAMP")
+        if "job_title" not in cols["users"]:
+            stmts.append("ALTER TABLE users ADD COLUMN job_title VARCHAR(120) NOT NULL DEFAULT ''")
+        if "department" not in cols["users"]:
+            stmts.append("ALTER TABLE users ADD COLUMN department VARCHAR(120) NOT NULL DEFAULT ''")
+        if "manager_name" not in cols["users"]:
+            stmts.append("ALTER TABLE users ADD COLUMN manager_name VARCHAR(120) NOT NULL DEFAULT ''")
+        if "manager_user_id" not in cols["users"]:
+            stmts.append("ALTER TABLE users ADD COLUMN manager_user_id INTEGER")
+        if "signature_image_file_id" not in cols["users"]:
+            stmts.append("ALTER TABLE users ADD COLUMN signature_image_file_id VARCHAR(36)")
+        if "onboarding_step" not in cols["users"]:
+            stmts.append("ALTER TABLE users ADD COLUMN onboarding_step INTEGER NOT NULL DEFAULT 1")
+        if "onboarding_completed_at" not in cols["users"]:
+            stmts.append("ALTER TABLE users ADD COLUMN onboarding_completed_at TIMESTAMP")
+        if "accepted_terms_version" not in cols["users"]:
+            stmts.append("ALTER TABLE users ADD COLUMN accepted_terms_version VARCHAR(64)")
+        if "onboarding_otp_verified_at" not in cols["users"]:
+            stmts.append("ALTER TABLE users ADD COLUMN onboarding_otp_verified_at TIMESTAMP")
+        if "onboarding_otp_session_id" not in cols["users"]:
+            stmts.append("ALTER TABLE users ADD COLUMN onboarding_otp_session_id VARCHAR(64)")
     if "files" in tables and "is_workflow" not in cols["files"]:
         stmts.append("ALTER TABLE files ADD COLUMN is_workflow BOOLEAN NOT NULL DEFAULT FALSE")
     if "audit_logs" in tables:

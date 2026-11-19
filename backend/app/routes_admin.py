@@ -7,17 +7,19 @@ from typing import List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, desc, select
+from sqlalchemy import delete, desc, func, select, update
 
 from .audit import audit
 from .deps import Ctx, get_db, require_admin
 from .pin import now_from_request
+from .pki_helpers import clean_cn, clean_email, next_key_ref
 from .models import (
     AuditLog,
     Certificate,
     Document,
     DocumentVersion,
     Notification,
+    OnboardingOtp,
     RecoveryCode,
     SessionRow,
     SignaturePreset,
@@ -37,38 +39,6 @@ log = logging.getLogger("esign.pki")
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 USERNAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,63}$")
 KEY_REF_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-_BAD_CN_RE = re.compile(r"[/\\+\x00-\x1f\x7f]")
-
-
-def _clean_cn(raw: str) -> str:
-    s = (raw or "").strip()
-    if not s or len(s) > 120 or _BAD_CN_RE.search(s):
-        raise HTTPException(400, "Tên hiển thị trên chứng thư không hợp lệ (không rỗng, không chứa / \\ +)")
-    return s
-
-
-def _next_key_ref(db, base: str) -> str:
-    norm = re.sub(r"[^A-Za-z0-9_-]+", "_", (base or "").strip().lower()).strip("_")
-    if len(norm) < 2:
-        norm = f"u_{norm or 'signer'}"
-    norm = norm[:56]
-    used = set(db.scalars(select(Certificate.key_ref)))
-    if norm not in used:
-        return norm
-    n = 2
-    while f"{norm}-{n}" in used:
-        n += 1
-    return f"{norm}-{n}"
-
-
-def _clean_email(v: Optional[str]) -> Optional[str]:
-    if not v or not v.strip():
-        return None
-    s = v.strip().lower()
-    if len(s) > 255 or not EMAIL_RE.match(s):
-        raise HTTPException(400, "Email không hợp lệ")
-    return s
 
 
 class UserIn(BaseModel):
@@ -103,6 +73,9 @@ def _user_out(u: User, cert_refs: Optional[List[str]] = None, now=None) -> dict:
     cur = now or utcnow()
     pin_locked = bool(u.pin_locked_until and u.pin_locked_until > cur)
     return {"id": u.id, "username": u.username, "display_name": u.display_name, "email": u.email, "role": u.role,
+            "job_title": u.job_title or "", "department": u.department or "", "manager_name": u.manager_name or "",
+            "onboarding_completed": u.onboarding_completed_at is not None,
+            "accepted_terms_version": u.accepted_terms_version,
             "is_active": u.is_active, "totp_enabled": u.totp_enabled,
             "locked": bool(u.locked_until and u.locked_until > cur),
             "has_signing_pin": bool(u.signing_pin_hash),
@@ -130,14 +103,16 @@ def create_user(body: UserIn, request: Request, ctx: Ctx = Depends(require_admin
         raise HTTPException(400, err)
     if db.scalar(select(User).where(User.username == username)):
         raise HTTPException(409, "Username đã tồn tại")
-    email = _clean_email(body.email)
+    email = clean_email(body.email)
+    if email and db.scalar(select(User.id).where(func.lower(User.email) == email.lower()).limit(1)) is not None:
+        raise HTTPException(409, "Email đã được sử dụng bởi tài khoản khác")
     display_name = body.display_name.strip()
 
     issued_cert = None
     key_ref = None
     if body.issue_cert:
-        cn = _clean_cn(display_name or username)
-        key_ref = _next_key_ref(db, username)
+        cn = clean_cn(display_name or username)
+        key_ref = next_key_ref(db, username)
         issued_cert = ca_issue(st, key_ref, cn, body.cert_days)
 
     u = User(username=username, display_name=display_name, email=email,
@@ -233,7 +208,10 @@ def unlock_user_pin(uid: int, ctx: Ctx = Depends(require_admin), db=Depends(get_
 @router.put("/users/{uid}/email")
 def update_user_email(uid: int, body: EmailIn, ctx: Ctx = Depends(require_admin), db=Depends(get_db)):
     u = _get_user(db, uid)
-    u.email = _clean_email(body.email)
+    email = clean_email(body.email)
+    if email and db.scalar(select(User.id).where(func.lower(User.email) == email.lower(), User.id != u.id).limit(1)) is not None:
+        raise HTTPException(409, "Email đã được sử dụng bởi tài khoản khác")
+    u.email = email
     db.commit()
     audit(db, ctx.ip, "user_update_email", user=ctx.user, detail=f"target={u.username}")
     return _user_out(u)
@@ -248,6 +226,35 @@ def reset_2fa(uid: int, ctx: Ctx = Depends(require_admin), db=Depends(get_db)):
     db.execute(delete(SessionRow).where(SessionRow.user_id == u.id))
     db.commit()
     audit(db, ctx.ip, "user_reset_2fa", user=ctx.user, detail=f"target={u.username}")
+    return _user_out(u)
+
+
+@router.post("/users/{uid}/reset-onboarding")
+def reset_onboarding(uid: int, ctx: Ctx = Depends(require_admin), db=Depends(get_db)):
+    """Buộc user thực hiện lại quy trình onboarding ở lần đăng nhập / tải trang kế tiếp."""
+    u = _get_user(db, uid)
+    u.onboarding_completed_at = None
+    u.onboarding_step = 1
+    u.accepted_terms_version = None
+    u.signature_image_file_id = None
+    u.onboarding_otp_verified_at = None
+    u.onboarding_otp_session_id = None
+    db.commit()
+    audit(db, ctx.ip, "admin_reset_onboarding", user=ctx.user, detail=f"target={u.username}")
+    return _user_out(u)
+
+
+@router.post("/users/{uid}/reset-pin")
+def reset_signing_pin(uid: int, ctx: Ctx = Depends(require_admin), db=Depends(get_db)):
+    """Xóa PIN ký hiện tại để người dùng phải đặt PIN mới."""
+    u = _get_user(db, uid)
+    u.signing_pin_hash = None
+    u.pin_set_at = None
+    u.pin_failed_attempts = 0
+    u.pin_fail_times_json = "[]"
+    u.pin_locked_until = None
+    db.commit()
+    audit(db, ctx.ip, "admin_reset_pin", user=ctx.user, detail=f"target={u.username}")
     return _user_out(u)
 
 
@@ -276,6 +283,8 @@ def delete_user(uid: int, ctx: Ctx = Depends(require_admin), db=Depends(get_db))
         )
 
     uname = u.username
+    db.execute(update(User).where(User.manager_user_id == u.id).values(manager_user_id=None))
+    db.execute(delete(OnboardingOtp).where(OnboardingOtp.user_id == u.id))
     db.execute(delete(SessionRow).where(SessionRow.user_id == u.id))
     db.execute(delete(RecoveryCode).where(RecoveryCode.user_id == u.id))
     db.execute(delete(UserCertificate).where(UserCertificate.user_id == u.id))
@@ -335,7 +344,7 @@ def issue_user_certificate(
 ):
     st = request.app.state.settings
     u = _get_user(db, uid)
-    cn = _clean_cn(body.common_name or u.display_name or u.username)
+    cn = clean_cn(body.common_name or u.display_name or u.username)
     if body.key_ref and body.key_ref.strip():
         key_ref = body.key_ref.strip()
         if not KEY_REF_RE.match(key_ref) or len(key_ref) < 2:
@@ -343,7 +352,7 @@ def issue_user_certificate(
         if db.scalar(select(Certificate).where(Certificate.key_ref == key_ref)):
             raise HTTPException(409, "key_ref đã tồn tại")
     else:
-        key_ref = _next_key_ref(db, u.username)
+        key_ref = next_key_ref(db, u.username)
 
     info = ca_issue(st, key_ref, cn, body.days)
     c = Certificate(
