@@ -18,7 +18,7 @@ def _path(settings, file_id: str) -> str:
 
 
 def store_bytes(db, settings, owner, data: bytes, *, kind: str, name: str, pages: int = 0,
-                parent_id: Optional[str] = None) -> StoredFile:
+                parent_id: Optional[str] = None, is_workflow: bool = False) -> StoredFile:
     fid = str(uuid.uuid4())
     os.makedirs(settings.upload_dir, mode=0o700, exist_ok=True)
     final = _path(settings, fid)
@@ -30,7 +30,8 @@ def store_bytes(db, settings, owner, data: bytes, *, kind: str, name: str, pages
     now = utcnow()
     row = StoredFile(id=fid, owner_id=owner.id, original_name=name[:255], kind=kind,
                      sha256=hashlib.sha256(data).hexdigest(), size=len(data), pages=pages,
-                     parent_id=parent_id, created_at=now, expires_at=now + timedelta(days=settings.retention_days))
+                     parent_id=parent_id, is_workflow=is_workflow,
+                     created_at=now, expires_at=now + timedelta(days=settings.retention_days))
     db.add(row)
     db.commit()
     return row
@@ -58,7 +59,7 @@ def get_file(db, ctx, file_id: str, *, owner_only: bool = False, kinds=None) -> 
     except ValueError:
         raise HTTPException(404, "Không tìm thấy file")
     f = db.get(StoredFile, file_id)
-    if f is None or f.deleted_at is not None or f.expires_at <= utcnow():
+    if f is None or f.deleted_at is not None or (not f.is_workflow and f.expires_at <= utcnow()):
         raise HTTPException(404, "Không tìm thấy file")
     is_owner = f.owner_id == ctx.user.id
     if not is_owner and not (ctx.user.role == "admin" and not owner_only):

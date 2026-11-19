@@ -39,6 +39,7 @@ class Settings:
     max_image_bytes: int = 2 * 1024 * 1024
     max_pages: int = 500
     retention_days: int = 7
+    workflow_retention_days: int = 0  # 0 = giữ vô thời hạn file luồng ký; >0 = xóa N ngày sau khi kết thúc
     session_ttl_minutes: int = 480
     cookie_secure: bool = True
     max_failed_logins: int = 5
@@ -85,6 +86,7 @@ class Settings:
             totp_enc_key=read_secret("TOTP_ENC_KEY"),
             max_upload_bytes=int(os.environ.get("MAX_UPLOAD_BYTES", str(25 * 1024 * 1024))),
             retention_days=int(os.environ.get("RETENTION_DAYS", "7")),
+            workflow_retention_days=int(os.environ.get("WORKFLOW_RETENTION_DAYS", "0")),
             session_ttl_minutes=int(os.environ.get("SESSION_TTL_MINUTES", "480")),
             cookie_secure=_bool("COOKIE_SECURE", True),
             max_failed_logins=int(os.environ.get("MAX_FAILED_LOGINS", "5")),

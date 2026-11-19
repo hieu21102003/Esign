@@ -38,7 +38,7 @@ class AssignIn(BaseModel):
 
 
 def _user_out(u: User) -> dict:
-    return {"id": u.id, "username": u.username, "display_name": u.display_name, "role": u.role,
+    return {"id": u.id, "username": u.username, "display_name": u.display_name, "email": u.email, "role": u.role,
             "is_active": u.is_active, "totp_enabled": u.totp_enabled,
             "locked": bool(u.locked_until and u.locked_until > utcnow()), "created_at": u.created_at.isoformat()}
 
@@ -189,13 +189,16 @@ def expiry_warnings(days: int = 30, request: Request = None, ctx: Ctx = Depends(
 
 
 @router.get("/audit")
-def read_audit(limit: int = 100, offset: int = 0, action: str = "", ctx: Ctx = Depends(require_admin),
-               db=Depends(get_db)):
+def read_audit(limit: int = 100, offset: int = 0, action: str = "", document_id: str = "",
+               ctx: Ctx = Depends(require_admin), db=Depends(get_db)):
     """Chỉ đọc. Không có endpoint nào sửa/xóa audit_logs."""
     q = select(AuditLog).order_by(desc(AuditLog.id)).limit(max(1, min(limit, 500))).offset(max(0, offset))
     if action:
         q = q.where(AuditLog.action == action)
+    if document_id:
+        q = q.where(AuditLog.document_id == document_id)
     return [{"id": a.id, "ts": a.ts.isoformat(), "user_id": a.user_id, "username": a.username, "action": a.action,
              "status": a.status, "ip": a.ip, "file_id": a.file_id, "file_sha256": a.file_sha256,
-             "output_sha256": a.output_sha256, "cert_key_ref": a.cert_key_ref, "detail": a.detail}
+             "output_sha256": a.output_sha256, "cert_key_ref": a.cert_key_ref, "detail": a.detail,
+             "document_id": a.document_id, "metadata_json": a.metadata_json}
             for a in db.scalars(q)]

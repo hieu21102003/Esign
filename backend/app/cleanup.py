@@ -3,15 +3,39 @@ from __future__ import annotations
 
 import logging
 import threading
+from datetime import timedelta
 from typing import Optional
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, or_, select
 
 from .audit import audit
-from .models import SessionRow, StoredFile, utcnow
+from .models import Document, DocumentVersion, SessionRow, StepAssignee, StoredFile, WorkflowStep, utcnow
 from .storage import remove_from_disk
 
 log = logging.getLogger("esign.cleanup")
+
+
+def _collect_doc_file_ids(db, doc_ids: set[str]) -> set[str]:
+    if not doc_ids:
+        return set()
+    out: set[str] = set()
+    for orig_id, cur_id in db.execute(
+        select(Document.original_file_id, Document.current_file_id).where(Document.id.in_(doc_ids))
+    ):
+        if orig_id:
+            out.add(orig_id)
+        if cur_id:
+            out.add(cur_id)
+    for fid in db.scalars(select(DocumentVersion.file_id).where(DocumentVersion.document_id.in_(doc_ids))):
+        if fid:
+            out.add(fid)
+    for fid in db.scalars(
+        select(StepAssignee.signed_file_id)
+        .join(WorkflowStep, StepAssignee.step_id == WorkflowStep.id)
+        .where(WorkflowStep.document_id.in_(doc_ids), StepAssignee.signed_file_id.isnot(None))
+    ):
+        out.add(fid)
+    return out
 
 
 def purge_expired(settings, session_factory) -> int:
@@ -19,8 +43,28 @@ def purge_expired(settings, session_factory) -> int:
     db = session_factory()
     try:
         now = utcnow()
-        rows = list(db.scalars(select(StoredFile).where(StoredFile.deleted_at.is_(None),
-                                                        StoredFile.expires_at <= now)))
+        rows = list(db.scalars(select(StoredFile).where(
+            StoredFile.deleted_at.is_(None),
+            StoredFile.is_workflow.is_(False),
+            StoredFile.expires_at <= now,
+        )))
+        wf_days = getattr(settings, "workflow_retention_days", 0)
+        if wf_days > 0:
+            cutoff = now - timedelta(days=wf_days)
+            protected_doc_ids = set(db.scalars(select(Document.id).where(
+                or_(Document.status == "in_progress", Document.updated_at > cutoff)
+            )))
+            expired_doc_ids = set(db.scalars(select(Document.id).where(
+                Document.status != "in_progress",
+                Document.updated_at <= cutoff,
+            )))
+            purge_ids = _collect_doc_file_ids(db, expired_doc_ids) - _collect_doc_file_ids(db, protected_doc_ids)
+            if purge_ids:
+                rows.extend(db.scalars(select(StoredFile).where(
+                    StoredFile.id.in_(purge_ids),
+                    StoredFile.deleted_at.is_(None),
+                    StoredFile.is_workflow.is_(True),
+                )))
         for f in rows:
             remove_from_disk(settings, f.id)
             f.deleted_at = now

@@ -139,6 +139,7 @@ services:
       COOKIE_SECURE: ${COOKIE_SECURE:-true}
       TRUST_PROXY: "true"
       TRUSTED_PROXIES: caddy
+      WORKFLOW_RETENTION_DAYS: ${WORKFLOW_RETENTION_DAYS:-0}
     secrets: [signer_token, totp_enc_key, db_password, admin_password]
     volumes:
       - api-data:/data
