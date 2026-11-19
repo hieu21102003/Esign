@@ -18,7 +18,8 @@ def _path(settings, file_id: str) -> str:
 
 
 def store_bytes(db, settings, owner, data: bytes, *, kind: str, name: str, pages: int = 0,
-                parent_id: Optional[str] = None, is_workflow: bool = False) -> StoredFile:
+                parent_id: Optional[str] = None, is_workflow: bool = False,
+                commit: bool = True) -> StoredFile:
     fid = str(uuid.uuid4())
     os.makedirs(settings.upload_dir, mode=0o700, exist_ok=True)
     final = _path(settings, fid)
@@ -33,7 +34,10 @@ def store_bytes(db, settings, owner, data: bytes, *, kind: str, name: str, pages
                      parent_id=parent_id, is_workflow=is_workflow,
                      created_at=now, expires_at=now + timedelta(days=settings.retention_days))
     db.add(row)
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
     return row
 
 

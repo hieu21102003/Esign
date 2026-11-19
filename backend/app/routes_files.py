@@ -70,8 +70,10 @@ def upload_file(request: Request, file: UploadFile = File(...), ctx: Ctx = Depen
 
 @router.get("/files")
 def list_files(ctx: Ctx = Depends(require_mfa), db=Depends(get_db)):
-    q = select(StoredFile).where(StoredFile.owner_id == ctx.user.id, StoredFile.deleted_at.is_(None),
-                                 StoredFile.expires_at > utcnow(), StoredFile.kind != "image")
+    q = select(StoredFile).where(
+        StoredFile.owner_id == ctx.user.id, StoredFile.deleted_at.is_(None),
+        StoredFile.is_workflow.is_(False), StoredFile.expires_at > utcnow(), StoredFile.kind != "image",
+    )
     return [_file_out(f) for f in db.scalars(q.order_by(StoredFile.created_at.desc()))]
 
 
@@ -98,6 +100,8 @@ def download(request: Request, file_id: str, ctx: Ctx = Depends(require_mfa), db
 @router.delete("/files/{file_id}")
 def delete_file(request: Request, file_id: str, ctx: Ctx = Depends(require_mfa), db=Depends(get_db)):
     f = get_file(db, ctx, file_id)
+    if f.is_workflow:
+        raise HTTPException(409, "Không thể xóa file đang thuộc luồng ký")
     remove_from_disk(request.app.state.settings, f.id)
     f.deleted_at = utcnow()
     db.commit()
@@ -152,8 +156,7 @@ def my_certificates(ctx: Ctx = Depends(require_mfa), db=Depends(get_db)):
             for c in db.scalars(q)]
 
 
-class SignRequest(BaseModel):
-    file_id: str
+class SignParams(BaseModel):
     cert_id: int
     mode: Literal["text", "image", "both"] = "text"
     image_id: Optional[str] = None
@@ -188,17 +191,17 @@ class SignRequest(BaseModel):
         return _CTRL.sub(" ", v).strip() if v else v
 
 
-@router.post("/sign")
-def sign(body: SignRequest, request: Request, ctx: Ctx = Depends(require_mfa), db=Depends(get_db)):
-    """Ký PDF. Yêu cầu: phiên hợp lệ + đã qua 2FA + là chủ file + chứng thư được admin gán cho người dùng."""
-    st = request.app.state.settings
-    rate_limit(request, "sign", str(ctx.user.id), st.sign_rate)
-    f = get_file(db, ctx, body.file_id, owner_only=True, kinds=("upload", "signed"))
+class SignRequest(SignParams):
+    file_id: str
+
+
+def validate_sign_inputs(db, st, ctx: Ctx, body: SignParams, f: StoredFile, *, document_id: Optional[str] = None):
+    """Kiểm tra chứng thư được gán, kích thước trang PDF, tọa độ ô ký và ảnh chữ ký."""
     cert = db.get(Certificate, body.cert_id)
     assigned = cert is not None and db.get(UserCertificate, (ctx.user.id, cert.id)) is not None
     if not assigned or not cert.active:
         audit(db, ctx.ip, "sign_denied", user=ctx.user, status="denied", file_id=f.id, file_sha256=f.sha256,
-              detail="Chứng thư không được gán/không hoạt động")
+              document_id=document_id, detail="Chứng thư không được gán/không hoạt động")
         raise HTTPException(403, "Bạn không được phép dùng chứng thư này")
 
     pdf = read_bytes(st, f)
@@ -216,6 +219,18 @@ def sign(body: SignRequest, request: Request, ctx: Ctx = Depends(require_mfa), d
         if not body.image_id:
             raise HTTPException(400, "Chế độ image/both cần image_id")
         img = read_bytes(st, get_file(db, ctx, body.image_id, owner_only=True, kinds=("image",)))
+    return cert, pdf, info, img
+
+
+@router.post("/sign")
+def sign(body: SignRequest, request: Request, ctx: Ctx = Depends(require_mfa), db=Depends(get_db)):
+    """Ký PDF. Yêu cầu: phiên hợp lệ + đã qua 2FA + là chủ file + chứng thư được admin gán cho người dùng."""
+    st = request.app.state.settings
+    rate_limit(request, "sign", str(ctx.user.id), st.sign_rate)
+    f = get_file(db, ctx, body.file_id, owner_only=True, kinds=("upload", "signed"))
+    if f.is_workflow:
+        raise HTTPException(409, "File thuộc luồng ký, vui lòng ký trong màn hình Luồng ký")
+    cert, pdf, info, img = validate_sign_inputs(db, st, ctx, body, f)
 
     params = body.model_dump(exclude={"file_id", "cert_id"})
     job = SignJob(user_id=ctx.user.id, input_file_id=f.id, cert_id=cert.id, params_json=json.dumps(params))
