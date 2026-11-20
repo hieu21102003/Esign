@@ -343,13 +343,6 @@ export function AdminView({ currentUserId }: { currentUserId?: number } = {}) {
     await loadAll();
   }
 
-  async function assignCert(uid: number, cid: number) {
-    setErr("");
-    await apiJson(`/api/admin/users/${uid}/certificates`, { method: "PUT", body: JSON.stringify({ cert_ids: [cid] }) });
-    setMsg("Đã gán chứng thư");
-    await loadAll();
-  }
-
   async function handleSmtpTest(e: React.FormEvent) {
     e.preventDefault();
     const target = testEmailTo.trim();
@@ -506,11 +499,6 @@ export function AdminView({ currentUserId }: { currentUserId?: number } = {}) {
                       Cấp cert mới
                     </button>
                   )}
-                  {certs.filter((c) => c.active).map((c) => (
-                    <button key={c.id} type="button" className="btn tiny" onClick={() => assignCert(u.id, c.id)}>
-                      Gán {c.key_ref}
-                    </button>
-                  ))}
                   {u.locked && (
                     <button type="button" className="btn tiny" onClick={() => apiJson(`/api/admin/users/${u.id}/unlock`, { method: "POST" }).then(loadAll)}>
                       Mở khóa
