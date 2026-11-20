@@ -236,6 +236,7 @@ def notify_users(
     message: str,
     email_subject: Optional[str] = None,
     email_body: Optional[str] = None,
+    task_id: Optional[int] = None,
     commit: bool = False,
 ) -> list[tuple[str, str, str]]:
     """Tạo notification trong DB cho danh sách user đang hoạt động; trả về danh sách email cần gửi."""
@@ -262,6 +263,7 @@ def notify_users(
         db.add(Notification(
             user_id=u.id,
             document_id=document_id,
+            task_id=task_id,
             kind=kind,
             title=clean_title,
             message=clean_msg,

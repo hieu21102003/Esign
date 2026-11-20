@@ -45,8 +45,19 @@ def health():
     return {"status": "ok"}
 
 
-@router.post("/files", status_code=201)
-def upload_file(request: Request, file: UploadFile = File(...), ctx: Ctx = Depends(require_mfa), db=Depends(get_db)):
+def ingest_uploaded_file(
+    db,
+    request: Request,
+    ctx: Ctx,
+    file: UploadFile,
+    *,
+    is_workflow: bool = False,
+    commit: bool = True,
+    task_id: Optional[int] = None,
+    workflow_id: Optional[int] = None,
+    document_id: Optional[str] = None,
+) -> tuple[StoredFile, dict, str, str]:
+    """Kiểm tra, chuyển đổi Office->PDF nếu cần, chuẩn hóa PDF và lưu vào kho dùng chung cho W1 & W6."""
     st = request.app.state.settings
     rate_limit(request, "upload", str(ctx.user.id), st.upload_rate)
     name = display_name(file.filename or "")
@@ -60,12 +71,29 @@ def upload_file(request: Request, file: UploadFile = File(...), ctx: Ctx = Depen
         pdf = normalize_pdf_if_hybrid(data) if ext == ".pdf" else convert_office(st, data, ext, name)
         info = inspect_pdf(pdf, st.max_pages)
     except HTTPException as exc:
-        audit(db, ctx.ip, "upload_rejected", user=ctx.user, status="denied", detail=f"{exc.detail}"[:300])
+        audit(
+            db, ctx.ip, "upload_rejected", user=ctx.user, status="denied",
+            task_id=task_id, workflow_id=workflow_id, document_id=document_id,
+            detail=f"{exc.detail}"[:300],
+        )
         raise
     stem = name.rsplit(".", 1)[0] if ext != ".pdf" else name[:-4]
-    f = store_bytes(db, st, ctx.user, pdf, kind="upload", name=stem + ".pdf", pages=info["pages"])
-    audit(db, ctx.ip, "upload", user=ctx.user, file_id=f.id, file_sha256=orig_hash,
-          output_sha256=f.sha256 if ext != ".pdf" else None, detail=f"ext={ext}")
+    f = store_bytes(
+        db, st, ctx.user, pdf, kind="upload", name=stem + ".pdf",
+        pages=info["pages"], is_workflow=is_workflow, commit=commit,
+    )
+    audit(
+        db, ctx.ip, "upload", user=ctx.user, file_id=f.id, file_sha256=orig_hash,
+        output_sha256=f.sha256 if ext != ".pdf" else None,
+        task_id=task_id, workflow_id=workflow_id, document_id=document_id,
+        detail=f"ext={ext}", commit=commit,
+    )
+    return f, info, orig_hash, ext
+
+
+@router.post("/files", status_code=201)
+def upload_file(request: Request, file: UploadFile = File(...), ctx: Ctx = Depends(require_mfa), db=Depends(get_db)):
+    f, info, _, _ = ingest_uploaded_file(db, request, ctx, file, is_workflow=False, commit=True)
     return {**_file_out(f), "page_sizes": info["sizes"]}
 
 
@@ -205,13 +233,17 @@ class SignRequest(SignParams):
     file_id: str
 
 
-def validate_sign_inputs(db, st, ctx: Ctx, body: SignParams, f: StoredFile, *, document_id: Optional[str] = None):
+def validate_sign_inputs(
+    db, st, ctx: Ctx, body: SignParams, f: StoredFile,
+    *, document_id: Optional[str] = None, task_id: Optional[int] = None, workflow_id: Optional[int] = None,
+):
     """Kiểm tra chứng thư được gán, kích thước trang PDF, tọa độ ô ký và ảnh chữ ký."""
     cert = db.get(Certificate, body.cert_id)
     assigned = cert is not None and db.get(UserCertificate, (ctx.user.id, cert.id)) is not None
     if not assigned or not cert.active:
         audit(db, ctx.ip, "sign_denied", user=ctx.user, status="denied", file_id=f.id, file_sha256=f.sha256,
-              document_id=document_id, detail="Chứng thư không được gán/không hoạt động")
+              document_id=document_id, task_id=task_id, workflow_id=workflow_id,
+              detail="Chứng thư không được gán/không hoạt động")
         raise HTTPException(403, "Bạn không được phép dùng chứng thư này")
 
     pdf = read_bytes(st, f)

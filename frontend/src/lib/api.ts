@@ -328,10 +328,23 @@ export interface WorkflowTimeline {
   events: TimelineEvent[];
 }
 
+export type NotificationKind =
+  | "assigned"
+  | "completed"
+  | "rejected"
+  | "cancelled"
+  | "task_assigned"
+  | "task_completed"
+  | "task_failed"
+  | "task_created"
+  | "task_edited"
+  | "follower_added";
+
 export interface NotificationItem {
   id: number;
   document_id: string | null;
-  kind: "assigned" | "completed" | "rejected" | "cancelled";
+  task_id: number | null;
+  kind: NotificationKind;
   title: string;
   message: string;
   is_read: boolean;

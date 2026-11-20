@@ -61,6 +61,8 @@ def verify_signing_pin(
     action: str,
     document_id: Optional[str] = None,
     file_id: Optional[str] = None,
+    task_id: Optional[int] = None,
+    workflow_id: Optional[int] = None,
 ) -> None:
     """Xác thực PIN ký của user hiện tại trước mọi hành động ký / từ chối / hủy."""
     st = request.app.state.settings
@@ -75,7 +77,7 @@ def verify_signing_pin(
         if not u.signing_pin_hash:
             audit(
                 db, ctx.ip, "pin_verify_failed", user=u, status="denied",
-                document_id=document_id, file_id=file_id,
+                document_id=document_id, file_id=file_id, task_id=task_id, workflow_id=workflow_id,
                 detail=f"action={action} reason=not_set", commit=True,
             )
             raise HTTPException(
@@ -89,7 +91,7 @@ def verify_signing_pin(
             wait_mins = max(1, (wait_secs + 59) // 60)
             audit(
                 db, ctx.ip, "pin_verify_locked", user=u, status="denied",
-                document_id=document_id, file_id=file_id,
+                document_id=document_id, file_id=file_id, task_id=task_id, workflow_id=workflow_id,
                 detail=f"action={action} wait={wait_secs}s", commit=True,
             )
             raise HTTPException(
@@ -101,7 +103,7 @@ def verify_signing_pin(
         if raw_pin is None or raw_pin == "":
             audit(
                 db, ctx.ip, "pin_verify_failed", user=u, status="denied",
-                document_id=document_id, file_id=file_id,
+                document_id=document_id, file_id=file_id, task_id=task_id, workflow_id=workflow_id,
                 detail=f"action={action} reason=missing", commit=True,
             )
             raise HTTPException(
@@ -141,7 +143,7 @@ def verify_signing_pin(
                 u.pin_fail_times_json = "[]"
                 audit(
                     db, ctx.ip, "pin_locked", user=u, status="denied",
-                    document_id=document_id, file_id=file_id,
+                    document_id=document_id, file_id=file_id, task_id=task_id, workflow_id=workflow_id,
                     detail=f"action={action} fails={len(recent)}", commit=False,
                 )
                 db.commit()
@@ -156,7 +158,7 @@ def verify_signing_pin(
             u.pin_fail_times_json = json.dumps(recent[-max_attempts:])
             audit(
                 db, ctx.ip, "pin_verify_failed", user=u, status="denied",
-                document_id=document_id, file_id=file_id,
+                document_id=document_id, file_id=file_id, task_id=task_id, workflow_id=workflow_id,
                 detail=f"action={action} remaining={remaining}", commit=False,
             )
             db.commit()
@@ -171,7 +173,7 @@ def verify_signing_pin(
         u.pin_locked_until = None
         audit(
             db, ctx.ip, "pin_verify_ok", user=u,
-            document_id=document_id, file_id=file_id,
+            document_id=document_id, file_id=file_id, task_id=task_id, workflow_id=workflow_id,
             detail=f"action={action}", commit=False,
         )
         db.commit()

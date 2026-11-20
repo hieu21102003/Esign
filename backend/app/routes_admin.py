@@ -27,8 +27,11 @@ from .models import (
     SignJob,
     StepAssignee,
     StoredFile,
+    Task,
+    Todo,
     User,
     UserCertificate,
+    Workflow,
     WorkflowStep,
     utcnow,
 )
@@ -279,6 +282,9 @@ def delete_user(uid: int, ctx: Ctx = Depends(require_admin), db=Depends(get_db))
             select(WorkflowStep.id).where(WorkflowStep.assigned_by_id == u.id).limit(1),
             select(StepAssignee.id).where(StepAssignee.user_id == u.id).limit(1),
             select(DocumentVersion.id).where(DocumentVersion.created_by_id == u.id).limit(1),
+            select(Workflow.id).where(Workflow.creator_id == u.id).limit(1),
+            select(Task.id).where(Task.creator_id == u.id).limit(1),
+            select(Todo.id).where(Todo.assignee_id == u.id).limit(1),
         )
     )
     if has_history:
@@ -481,6 +487,7 @@ def test_smtp_email(body: SmtpTestIn, request: Request, ctx: Ctx = Depends(requi
 
 @router.get("/audit")
 def read_audit(limit: int = 100, offset: int = 0, action: str = "", document_id: str = "",
+               task_id: Optional[int] = None, workflow_id: Optional[int] = None,
                ctx: Ctx = Depends(require_admin), db=Depends(get_db)):
     """Chỉ đọc. Không có endpoint nào sửa/xóa audit_logs."""
     q = select(AuditLog).order_by(desc(AuditLog.id)).limit(max(1, min(limit, 500))).offset(max(0, offset))
@@ -488,8 +495,13 @@ def read_audit(limit: int = 100, offset: int = 0, action: str = "", document_id:
         q = q.where(AuditLog.action == action)
     if document_id:
         q = q.where(AuditLog.document_id == document_id)
+    if task_id is not None:
+        q = q.where(AuditLog.task_id == task_id)
+    if workflow_id is not None:
+        q = q.where(AuditLog.workflow_id == workflow_id)
     return [{"id": a.id, "ts": a.ts.isoformat(), "user_id": a.user_id, "username": a.username, "action": a.action,
              "status": a.status, "ip": a.ip, "file_id": a.file_id, "file_sha256": a.file_sha256,
              "output_sha256": a.output_sha256, "cert_key_ref": a.cert_key_ref, "detail": a.detail,
-             "document_id": a.document_id, "metadata_json": a.metadata_json}
+             "document_id": a.document_id, "task_id": a.task_id, "workflow_id": a.workflow_id,
+             "metadata_json": a.metadata_json}
             for a in db.scalars(q)]

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -11,11 +12,21 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 
-from . import routes_admin, routes_auth, routes_files, routes_notifications, routes_onboarding, routes_workflow
+from . import (
+    routes_admin,
+    routes_auth,
+    routes_files,
+    routes_notifications,
+    routes_onboarding,
+    routes_wfengine,
+    routes_workflow,
+)
 from .cleanup import CleanupThread
 from .config import Settings
 from .models import User, init_db, make_engine, make_session_factory
 from .security import RateLimiter, SecretBox, check_password_policy, hash_password
+from .wf_signing import register_w6_handlers
+from .wf_templates import seed_builtin_templates
 
 UNSAFE = {"POST", "PUT", "PATCH", "DELETE"}
 UPLOAD_PATHS = (
@@ -25,6 +36,7 @@ UPLOAD_PATHS = (
     "/api/onboarding/signature-image/preview",
     "/api/onboarding/signature-image/save",
 )
+_TASK_DOC_UPLOAD_RE = re.compile(r"^/api/tasks/\d+/document$")
 SMALL_BODY = 1024 * 1024
 
 
@@ -54,6 +66,12 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     init_db(engine)
     sf = make_session_factory(engine)
     bootstrap_admin(st, sf)
+    db_tpl = sf()
+    try:
+        seed_builtin_templates(db_tpl, commit=True)
+    finally:
+        db_tpl.close()
+    register_w6_handlers()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -94,7 +112,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     n = int(cl)
                 except ValueError:
                     return JSONResponse({"detail": "Content-Length không hợp lệ"}, status_code=400)
-                limit = st.max_upload_bytes + SMALL_BODY if path in UPLOAD_PATHS else SMALL_BODY
+                is_upload = path in UPLOAD_PATHS or bool(_TASK_DOC_UPLOAD_RE.match(path))
+                limit = st.max_upload_bytes + SMALL_BODY if is_upload else SMALL_BODY
                 if n > limit:
                     return JSONResponse({"detail": "Body quá lớn"}, status_code=413)
         resp = await call_next(request)
@@ -111,4 +130,5 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     app.include_router(routes_files.router)
     app.include_router(routes_notifications.router)
     app.include_router(routes_workflow.router)
+    app.include_router(routes_wfengine.router)
     return app

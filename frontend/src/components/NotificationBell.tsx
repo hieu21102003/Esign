@@ -1,26 +1,41 @@
-import React, { useEffect, useRef, useState } from "react";
-import { apiJson, type NotificationItem, type NotificationsResponse } from "../lib/api";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { apiJson, type NotificationItem, type NotificationKind, type NotificationsResponse } from "../lib/api";
+import { useVisibilityPolling } from "../lib/usePolling";
 
 interface Props {
   refreshSignal: number;
   onOpenDocument: (docId: string) => void;
+  onOpenTask?: (taskId: number) => void;
 }
 
-export function NotificationBell({ refreshSignal, onOpenDocument }: Props) {
+const KIND_BADGE: Record<NotificationKind, { label: string; cls: string }> = {
+  assigned: { label: "Giao ký", cls: "mode-badge" },
+  completed: { label: "Ký xong", cls: "ok" },
+  rejected: { label: "Từ chối", cls: "bad" },
+  cancelled: { label: "Đã hủy", cls: "muted" },
+  task_assigned: { label: "Giao việc", cls: "mode-badge" },
+  task_completed: { label: "Hoàn thành", cls: "ok" },
+  task_failed: { label: "Thất bại", cls: "bad" },
+  task_created: { label: "Nhiệm vụ mới", cls: "muted" },
+  task_edited: { label: "Cập nhật", cls: "muted" },
+  follower_added: { label: "Theo dõi", cls: "warn" },
+};
+
+export function NotificationBell({ refreshSignal, onOpenDocument, onOpenTask }: Props) {
   const [open, setOpen] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
   const [items, setItems] = useState<NotificationItem[]>([]);
   const [loading, setLoading] = useState(false);
   const wrapRef = useRef<HTMLDivElement | null>(null);
 
-  async function refreshCount() {
+  const refreshCount = useCallback(async () => {
     try {
       const res = await apiJson<{ unread_count: number }>("/api/notifications/unread-count");
       setUnreadCount(res.unread_count);
     } catch {
       // ignore transient polling failure
     }
-  }
+  }, []);
 
   async function loadList() {
     setLoading(true);
@@ -35,9 +50,9 @@ export function NotificationBell({ refreshSignal, onOpenDocument }: Props) {
 
   useEffect(() => {
     refreshCount();
-    const timer = window.setInterval(refreshCount, 30000);
-    return () => window.clearInterval(timer);
-  }, []);
+  }, [refreshCount]);
+
+  useVisibilityPolling(refreshCount, 25000);
 
   useEffect(() => {
     if (refreshSignal > 0) {
@@ -92,7 +107,9 @@ export function NotificationBell({ refreshSignal, onOpenDocument }: Props) {
       }
     }
     setOpen(false);
-    if (item.document_id) {
+    if (item.task_id && onOpenTask) {
+      onOpenTask(item.task_id);
+    } else if (item.document_id) {
       onOpenDocument(item.document_id);
     }
   }
@@ -137,22 +154,28 @@ export function NotificationBell({ refreshSignal, onOpenDocument }: Props) {
             ) : items.length === 0 ? (
               <div className="notif-empty muted">Chưa có thông báo nào</div>
             ) : (
-              items.map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  className={`notif-item ${item.is_read ? "" : "unread"}`}
-                  onClick={() => handleItemClick(item)}
-                  data-testid={`notif-item-${item.id}`}
-                >
-                  <div className="notif-item-title">
-                    <span>{item.title}</span>
-                    {!item.is_read && <span className="notif-dot" />}
-                  </div>
-                  <div className="notif-item-msg">{item.message}</div>
-                  <div className="muted mono">{item.created_at.slice(0, 16).replace("T", " ")}</div>
-                </button>
-              ))
+              items.map((item) => {
+                const badge = KIND_BADGE[item.kind];
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className={`notif-item ${item.is_read ? "" : "unread"}`}
+                    onClick={() => handleItemClick(item)}
+                    data-testid={`notif-item-${item.id}`}
+                  >
+                    <div className="notif-item-title">
+                      <span>{item.title}</span>
+                      <span className="row" style={{ gap: 4 }}>
+                        {badge && <span className={`badge ${badge.cls}`}>{badge.label}</span>}
+                        {!item.is_read && <span className="notif-dot" />}
+                      </span>
+                    </div>
+                    <div className="notif-item-msg">{item.message}</div>
+                    <div className="muted mono">{item.created_at.slice(0, 16).replace("T", " ")}</div>
+                  </button>
+                );
+              })
             )}
           </div>
         </div>

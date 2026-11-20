@@ -14,6 +14,7 @@ def _notif_out(n: Notification) -> dict:
     return {
         "id": n.id,
         "document_id": n.document_id,
+        "task_id": n.task_id,
         "kind": n.kind,
         "title": n.title,
         "message": n.message,

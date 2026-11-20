@@ -4,14 +4,44 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, event, inspect
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    create_engine,
+    event,
+    inspect,
+)
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 DOC_STATUSES = ("in_progress", "completed", "rejected", "cancelled")
 STEP_MODES = ("all", "any")
 STEP_STATUSES = ("active", "completed", "rejected", "cancelled")
 ASSIGNEE_STATUSES = ("pending", "signed", "rejected", "skipped")
-NOTIF_KINDS = ("assigned", "completed", "rejected", "cancelled")
+NOTIF_KINDS = (
+    "assigned", "completed", "rejected", "cancelled",
+    "task_assigned", "task_completed", "task_failed", "task_created", "task_edited", "follower_added",
+)
+
+# --- W5: Workflow engine (Workflow -> Stage -> Task -> Todo) ---
+WF_VISIBILITIES = ("followers_only", "all_visible")
+WF_STATUSES = ("active", "closed")
+WF_ROLES = ("admin", "supervisor", "creator", "viewer")
+STAGE_TYPES = ("normal", "sign", "approve")
+ASSIGN_MODES = ("any", "all")
+FIELD_TYPES = ("text", "textarea", "date", "file", "number", "select", "user")
+TASK_STATUSES = ("processing", "completed", "failed")
+TODO_STATUSES = ("doing", "done", "failed", "cancelled")
+
+# text[] trên PostgreSQL, JSON trên SQLite (test cục bộ)
+_LabelsType = JSON().with_variant(ARRAY(Text), "postgresql")
 
 
 def utcnow() -> datetime:
@@ -162,6 +192,8 @@ class WorkflowStep(Base):
     mode: Mapped[str] = mapped_column(String(8), default="all")  # all | any
     status: Mapped[str] = mapped_column(String(16), default="active", index=True)
     assigned_by_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    # W6: liên kết ngược với công việc W5 nếu bước ký thuộc workflow engine
+    task_id: Mapped[Optional[int]] = mapped_column(ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
@@ -203,12 +235,153 @@ class Notification(Base):
     document_id: Mapped[Optional[str]] = mapped_column(
         ForeignKey("documents.id", ondelete="CASCADE"), nullable=True, index=True
     )
-    kind: Mapped[str] = mapped_column(String(24), index=True)  # assigned | completed | rejected | cancelled
+    task_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("tasks.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    # assigned | completed | rejected | cancelled (luồng ký) ; task_* | follower_added (workflow engine W5)
+    kind: Mapped[str] = mapped_column(String(24), index=True)
     title: Mapped[str] = mapped_column(String(200))
     message: Mapped[str] = mapped_column(String(500), default="")
     is_read: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
     read_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class Workflow(Base):
+    """Định nghĩa quy trình (W5): các stage tuần tự, form động, vai trò và lý do thất bại."""
+    __tablename__ = "workflows"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(200))
+    slug: Mapped[str] = mapped_column(String(100), unique=True, index=True)
+    category: Mapped[str] = mapped_column(String(100), default="")
+    description: Mapped[str] = mapped_column(Text, default="")
+    guide_html: Mapped[str] = mapped_column(Text, default="")
+    visibility: Mapped[str] = mapped_column(String(16), default="followers_only")  # followers_only | all_visible
+    status: Mapped[str] = mapped_column(String(16), default="active")  # active | closed
+    creator_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class WorkflowRole(Base):
+    __tablename__ = "workflow_roles"
+    workflow_id: Mapped[int] = mapped_column(ForeignKey("workflows.id", ondelete="CASCADE"), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True, index=True)
+    role: Mapped[str] = mapped_column(String(16), primary_key=True)  # admin | supervisor | creator | viewer
+
+
+class WorkflowFailureReason(Base):
+    __tablename__ = "workflow_failure_reasons"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workflow_id: Mapped[int] = mapped_column(ForeignKey("workflows.id", ondelete="CASCADE"), index=True)
+    label: Mapped[str] = mapped_column(String(200))
+    order: Mapped[int] = mapped_column("order", Integer, default=0)
+
+
+class Stage(Base):
+    __tablename__ = "stages"
+    __table_args__ = (UniqueConstraint("workflow_id", "order", name="uq_stages_workflow_order"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workflow_id: Mapped[int] = mapped_column(ForeignKey("workflows.id", ondelete="CASCADE"), index=True)
+    order: Mapped[int] = mapped_column("order", Integer)
+    name: Mapped[str] = mapped_column(String(200))
+    type: Mapped[str] = mapped_column(String(16), default="normal")  # normal | sign | approve
+    sla_hours: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    guide_html: Mapped[str] = mapped_column(Text, default="")
+    assign_mode: Mapped[str] = mapped_column(String(8), default="all")  # any | all
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class StageMember(Base):
+    __tablename__ = "stage_members"
+    stage_id: Mapped[int] = mapped_column(ForeignKey("stages.id", ondelete="CASCADE"), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True, index=True)
+
+
+class FormField(Base):
+    __tablename__ = "form_fields"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workflow_id: Mapped[int] = mapped_column(ForeignKey("workflows.id", ondelete="CASCADE"), index=True)
+    label: Mapped[str] = mapped_column(String(200))
+    type: Mapped[str] = mapped_column(String(16))  # text|textarea|date|file|number|select|user
+    required: Mapped[bool] = mapped_column(Boolean, default=False)
+    placeholder: Mapped[str] = mapped_column(String(200), default="")
+    options: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    order: Mapped[int] = mapped_column("order", Integer, default=0)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class WorkflowTemplate(Base):
+    __tablename__ = "templates"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    slug: Mapped[str] = mapped_column(String(100), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    category: Mapped[str] = mapped_column(String(100), default="")
+    description: Mapped[str] = mapped_column(Text, default="")
+    definition: Mapped[dict] = mapped_column(JSON)
+    is_builtin: Mapped[bool] = mapped_column(Boolean, default=False)
+    creator_id: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class Task(Base):
+    """Một công việc (job) chạy qua các stage của workflow."""
+    __tablename__ = "tasks"
+    __table_args__ = (
+        Index("ix_tasks_workflow_status", "workflow_id", "status"),
+        Index("ix_tasks_current_stage", "current_stage_id"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workflow_id: Mapped[int] = mapped_column(ForeignKey("workflows.id"), index=True)
+    current_stage_id: Mapped[Optional[int]] = mapped_column(ForeignKey("stages.id"), nullable=True)
+    title: Mapped[str] = mapped_column(String(255))
+    labels: Mapped[Optional[list]] = mapped_column(_LabelsType, nullable=True)
+    creator_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    description_html: Mapped[str] = mapped_column(Text, default="")
+    custom_values: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    # Hạn xử lý của stage hiện tại (= thời điểm vào stage + sla_hours); suy ra "quá hạn" khi < now và đang processing
+    deadline: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(16), default="processing")  # processing | completed | failed
+    failure_reason_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("workflow_failure_reasons.id"), nullable=True
+    )
+    # Chỗ cắm cho W6 (bước ký): liên kết tới luồng ký/tài liệu hiện có
+    document_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("documents.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    archived_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class TaskFollower(Base):
+    __tablename__ = "task_followers"
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True, index=True)
+
+
+class Todo(Base):
+    __tablename__ = "todos"
+    __table_args__ = (
+        Index("ix_todos_assignee_status", "assignee_id", "status"),
+        Index("ix_todos_deadline", "deadline"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), index=True)
+    stage_id: Mapped[int] = mapped_column(ForeignKey("stages.id"), index=True)
+    assignee_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    result: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    deadline: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="doing")  # doing | done | failed | cancelled
+    # W6: liên kết todo <-> bước ký của tài liệu để truy ngược giữa 2 luồng
+    workflow_step_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("workflow_steps.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    step_assignee_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("step_assignees.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
 class TermsAcceptance(Base):
@@ -255,6 +428,9 @@ class AuditLog(Base):
     detail: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     document_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
     metadata_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # W5: truy vết theo task/workflow (không FK để nhật ký bất biến độc lập với dữ liệu nghiệp vụ)
+    task_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    workflow_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
 
 
 @event.listens_for(AuditLog, "before_update")
@@ -347,6 +523,36 @@ def migrate_db(engine) -> None:
         stmts.append("CREATE INDEX IF NOT EXISTS ix_audit_logs_document_id ON audit_logs (document_id)")
         if "metadata_json" not in cols["audit_logs"]:
             stmts.append("ALTER TABLE audit_logs ADD COLUMN metadata_json TEXT")
+        if "task_id" not in cols["audit_logs"]:
+            stmts.append("ALTER TABLE audit_logs ADD COLUMN task_id INTEGER")
+        if "workflow_id" not in cols["audit_logs"]:
+            stmts.append("ALTER TABLE audit_logs ADD COLUMN workflow_id INTEGER")
+        stmts.append("CREATE INDEX IF NOT EXISTS ix_audit_logs_task_id ON audit_logs (task_id)")
+        stmts.append("CREATE INDEX IF NOT EXISTS ix_audit_logs_workflow_id ON audit_logs (workflow_id)")
+    # Bảng workflow mới (tasks...) đã được create_all tạo trước khi chạy migrate_db
+    if "notifications" in tables and "task_id" not in cols["notifications"]:
+        stmts.append(
+            "ALTER TABLE notifications ADD COLUMN task_id INTEGER REFERENCES tasks(id) ON DELETE CASCADE"
+        )
+        stmts.append("CREATE INDEX IF NOT EXISTS ix_notifications_task_id ON notifications (task_id)")
+    if "workflow_steps" in tables and "task_id" not in cols["workflow_steps"]:
+        stmts.append("ALTER TABLE workflow_steps ADD COLUMN task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL")
+        stmts.append("CREATE INDEX IF NOT EXISTS ix_workflow_steps_task_id ON workflow_steps (task_id)")
+    if "todos" in tables:
+        if "workflow_step_id" not in cols["todos"]:
+            stmts.append(
+                "ALTER TABLE todos ADD COLUMN workflow_step_id INTEGER REFERENCES workflow_steps(id) ON DELETE SET NULL"
+            )
+            stmts.append("CREATE INDEX IF NOT EXISTS ix_todos_workflow_step_id ON todos (workflow_step_id)")
+        if "step_assignee_id" not in cols["todos"]:
+            stmts.append(
+                "ALTER TABLE todos ADD COLUMN step_assignee_id INTEGER REFERENCES step_assignees(id) ON DELETE SET NULL"
+            )
+            stmts.append("CREATE INDEX IF NOT EXISTS ix_todos_step_assignee_id ON todos (step_assignee_id)")
+    if "stages" in tables and "is_active" not in cols["stages"]:
+        stmts.append("ALTER TABLE stages ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT TRUE")
+    if "form_fields" in tables and "is_active" not in cols["form_fields"]:
+        stmts.append("ALTER TABLE form_fields ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT TRUE")
     with engine.begin() as con:
         for ddl in stmts:
             con.exec_driver_sql(ddl)

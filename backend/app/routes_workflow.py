@@ -5,6 +5,7 @@ import json
 import re
 import threading
 import uuid
+from contextlib import nullcontext
 from datetime import datetime
 from typing import List, Literal, Optional
 from urllib.parse import quote
@@ -14,7 +15,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import and_, func, or_, select
 
-from .audit import audit
+from .audit import audit, audit_event_out
 from .deps import Ctx, get_db, rate_limit, require_mfa
 from .models import (
     DOC_STATUSES,
@@ -23,18 +24,22 @@ from .models import (
     Document,
     DocumentVersion,
     SignJob,
+    StageMember,
     StepAssignee,
     StoredFile,
+    Task,
+    Todo,
     User,
     UserCertificate,
     WorkflowStep,
     utcnow,
 )
 from .notifications import dispatch_emails, notify_users
-from .pin import verify_signing_pin
+from .pin import now_from_request, verify_signing_pin
 from .routes_files import SignParams, validate_sign_inputs
 from .services import ServiceError, b64, inspect_pdf, signer_sign, signer_verify
 from .storage import get_file, read_bytes, remove_from_disk, store_bytes
+from .wf_engine import complete_todo, fail_todo, task_lock, visible_task_clause
 
 router = APIRouter(prefix="/api", tags=["workflow"])
 _CTRL = re.compile(r"[\x00-\x1f\x7f]")
@@ -96,6 +101,7 @@ class DocumentSignIn(SignParams):
 class RejectIn(BaseModel):
     reason: str = Field(min_length=1, max_length=500)
     pin: Optional[str] = None
+    failure_reason_id: Optional[int] = None
 
     @field_validator("reason")
     @classmethod
@@ -170,7 +176,16 @@ def _validate_assignees(db, raw_ids: List[int]) -> List[int]:
     return ids
 
 
+def _linked_task(db, doc_id: str) -> Optional[Task]:
+    return db.scalar(select(Task).where(Task.document_id == doc_id).limit(1))
+
+
 def _can_view_document(db, doc: Document, user: User) -> bool:
+    linked = _linked_task(db, doc.id)
+    if linked is not None:
+        return db.scalar(
+            select(Task.id).where(Task.id == linked.id, visible_task_clause(user.id)).limit(1)
+        ) is not None
     if user.role == "admin" or doc.creator_id == user.id:
         return True
     assigned = db.scalar(
@@ -464,7 +479,7 @@ def list_documents(
         q = q.where(or_(Document.creator_id == ctx.user.id, Document.id.in_(assigned_doc_ids)))
 
     docs = list(db.scalars(q.order_by(Document.updated_at.desc(), Document.created_at.desc())))
-    return [_document_summary(db, d, ctx.user) for d in docs]
+    return [_document_summary(db, d, ctx.user) for d in docs if _can_view_document(db, d, ctx.user)]
 
 
 @router.get("/documents/{doc_id}")
@@ -473,9 +488,11 @@ def get_document(
     ctx: Ctx = Depends(require_mfa), db=Depends(get_db),
 ):
     doc = _get_doc_for_view(db, doc_id, ctx.user)
+    linked = _linked_task(db, doc.id)
     if track:
         audit(
             db, ctx.ip, "doc_view", user=ctx.user, document_id=doc.id,
+            task_id=linked.id if linked else None, workflow_id=linked.workflow_id if linked else None,
             file_id=doc.current_file_id,
         )
     return _document_detail(db, request.app.state.settings, doc, ctx.user)
@@ -486,27 +503,7 @@ def document_timeline(doc_id: str, ctx: Ctx = Depends(require_mfa), db=Depends(g
     doc = _get_doc_for_view(db, doc_id, ctx.user)
     steps, assignees_by_step, _versions, users = _load_doc_graph(db, doc)
     logs = list(db.scalars(select(AuditLog).where(AuditLog.document_id == doc.id).order_by(AuditLog.id)))
-    events = []
-    for a in logs:
-        meta = None
-        if a.metadata_json:
-            try:
-                meta = json.loads(a.metadata_json)
-            except ValueError:
-                meta = None
-        events.append({
-            "id": a.id,
-            "ts": a.ts.isoformat(),
-            "user_id": a.user_id,
-            "username": a.username,
-            "action": a.action,
-            "status": a.status,
-            "ip": a.ip,
-            "file_id": a.file_id,
-            "cert_key_ref": a.cert_key_ref,
-            "detail": a.detail,
-            "metadata": meta,
-        })
+    events = [audit_event_out(a) for a in logs]
     return {
         "document_id": doc.id,
         "title": doc.title,
@@ -543,9 +540,14 @@ def _resolve_doc_file(db, doc: Document, version_no: Optional[int] = None) -> St
 @router.get("/documents/{doc_id}/file")
 def download_document_file(doc_id: str, request: Request, ctx: Ctx = Depends(require_mfa), db=Depends(get_db)):
     doc = _get_doc_for_view(db, doc_id, ctx.user)
+    linked = _linked_task(db, doc.id)
     f = _resolve_doc_file(db, doc)
     data = read_bytes(request.app.state.settings, f)
-    audit(db, ctx.ip, "download", user=ctx.user, document_id=doc.id, file_id=f.id, file_sha256=f.sha256)
+    audit(
+        db, ctx.ip, "download", user=ctx.user, document_id=doc.id,
+        task_id=linked.id if linked else None, workflow_id=linked.workflow_id if linked else None,
+        file_id=f.id, file_sha256=f.sha256,
+    )
     return _pdf_response(f, data)
 
 
@@ -554,10 +556,12 @@ def download_document_version(
     doc_id: str, version_no: int, request: Request, ctx: Ctx = Depends(require_mfa), db=Depends(get_db)
 ):
     doc = _get_doc_for_view(db, doc_id, ctx.user)
+    linked = _linked_task(db, doc.id)
     f = _resolve_doc_file(db, doc, version_no=version_no)
     data = read_bytes(request.app.state.settings, f)
     audit(
         db, ctx.ip, "download", user=ctx.user, document_id=doc.id,
+        task_id=linked.id if linked else None, workflow_id=linked.workflow_id if linked else None,
         file_id=f.id, file_sha256=f.sha256, metadata={"version_no": version_no},
     )
     return _pdf_response(f, data)
@@ -571,10 +575,12 @@ def verify_document(
     st = request.app.state.settings
     rate_limit(request, "verify", str(ctx.user.id), st.verify_rate)
     doc = _get_doc_for_view(db, doc_id, ctx.user)
+    linked = _linked_task(db, doc.id)
     f = _resolve_doc_file(db, doc, version_no=version_no)
     sigs = signer_verify(st, read_bytes(st, f))
     audit(
         db, ctx.ip, "verify", user=ctx.user, document_id=doc.id, file_id=f.id, file_sha256=f.sha256,
+        task_id=linked.id if linked else None, workflow_id=linked.workflow_id if linked else None,
         metadata={"version_no": version_no} if version_no is not None else None,
         detail=f"signatures={len(sigs)} all_ok={bool(sigs) and all(s.get('ok') for s in sigs)}",
     )
@@ -609,163 +615,235 @@ def _load_locked_doc_and_step(db, doc_id: str, uid: int):
 def sign_document(
     doc_id: str, body: DocumentSignIn, request: Request, ctx: Ctx = Depends(require_mfa), db=Depends(get_db)
 ):
-    """Ký PDF nối tiếp trong luồng ký, dùng khóa theo document_id để tuần tự hóa ký song song."""
+    """Ký PDF nối tiếp trong luồng ký, dùng khóa theo document_id (và task_id nếu gắn W5) để tuần tự hóa."""
     st = request.app.state.settings
     rate_limit(request, "sign", str(ctx.user.id), st.sign_rate)
     _validate_uuid(doc_id)
-    verify_signing_pin(db, request, ctx, body.pin, action="doc_sign", document_id=doc_id)
+    pre_task = _linked_task(db, doc_id)
+    verify_signing_pin(
+        db, request, ctx, body.pin, action="doc_sign", document_id=doc_id,
+        task_id=pre_task.id if pre_task else None,
+        workflow_id=pre_task.workflow_id if pre_task else None,
+    )
     uid, ip = ctx.user.id, ctx.ip
 
-    with _doc_lock(doc_id):
-        actor, doc, step, assignees = _load_locked_doc_and_step(db, doc_id, uid)
-        if step.status != "active":
-            raise HTTPException(409, "Bước hiện tại đã hoàn tất, không thể ký thêm")
-        me = next((a for a in assignees if a.user_id == uid), None)
-        if me is None:
-            raise HTTPException(403, "Bạn không được giao ký ở bước hiện tại")
-        if me.status == "signed":
-            raise HTTPException(409, "Bạn đã ký ở bước này rồi")
-        if me.status != "pending":
-            raise HTTPException(409, "Lượt ký của bạn không còn hiệu lực")
-
-        other_pending = [a for a in assignees if a.id != me.id and a.status == "pending"]
-        will_complete_step = (step.mode == "any") or (len(other_pending) == 0)
-        if body.next_action is not None and not will_complete_step:
-            raise HTTPException(
-                409, "Vẫn còn người ký khác chưa hoàn tất bước này; hãy ký trước, người ký cuối sẽ chuyển tiếp hoặc hoàn tất"
-            )
-        next_uids = _validate_assignees(db, body.next_assignee_ids) if body.next_action == "assign" else []
-
-        cur_file = _resolve_doc_file(db, doc)
-        actor_ctx = Ctx(user=actor, sess=ctx.sess, ip=ip)
-        cert, pdf, info, img = validate_sign_inputs(db, st, actor_ctx, body, cur_file, document_id=doc.id)
-
-        params = body.model_dump(exclude={"cert_id", "pin", "next_action", "next_assignee_ids", "next_mode"})
-        payload = {
-            "key_ref": cert.key_ref, "pdf_b64": b64(pdf), "image_b64": b64(img),
-            "mode": body.mode, "page": body.page, "box": body.box,
-            "reason": body.reason, "location": body.location, "title": body.title,
-            "show": body.show, "level": body.level,
-        }
-        try:
-            signed = signer_sign(st, payload)
-        except ValueError as exc:
-            db.add(SignJob(
-                user_id=uid, input_file_id=cur_file.id, cert_id=cert.id,
-                params_json=json.dumps(params), status="failed", error=str(exc)[:400], finished_at=utcnow(),
-            ))
-            audit(
-                db, ip, "sign_failed", user=actor, status="error", document_id=doc.id,
-                file_id=cur_file.id, file_sha256=cur_file.sha256, cert_key_ref=cert.key_ref,
-                detail=str(exc)[:300], commit=False,
-            )
-            db.commit()
-            raise HTTPException(400, str(exc))
-        except ServiceError as exc:
-            db.add(SignJob(
-                user_id=uid, input_file_id=cur_file.id, cert_id=cert.id,
-                params_json=json.dumps(params), status="failed", error=str(exc)[:400], finished_at=utcnow(),
-            ))
-            audit(
-                db, ip, "sign_failed", user=actor, status="error", document_id=doc.id,
-                file_id=cur_file.id, file_sha256=cur_file.sha256, cert_key_ref=cert.key_ref,
-                detail=str(exc)[:300], commit=False,
-            )
-            db.commit()
-            raise HTTPException(502, "Dịch vụ ký không khả dụng")
-
-        now = utcnow()
-        next_ver = (db.scalar(select(func.max(DocumentVersion.version_no)).where(DocumentVersion.document_id == doc.id)) or 0) + 1
-        stem = cur_file.original_name[:-4] if cur_file.original_name.lower().endswith(".pdf") else cur_file.original_name
-        stem = re.sub(r"-v\d+$", "", re.sub(r"-signed(-\d+)?$", "", stem))
-
-        out = store_bytes(
-            db, st, actor, signed, kind="signed", name=f"{stem}-v{next_ver}.pdf",
-            pages=info["pages"], parent_id=cur_file.id, is_workflow=True, commit=False,
-        )
-        try:
-            job = SignJob(
-                user_id=uid, input_file_id=cur_file.id, output_file_id=out.id, cert_id=cert.id,
-                params_json=json.dumps(params), status="done", created_at=now, finished_at=now,
-            )
-            db.add(job)
-            db.flush()
-
-            db.add(DocumentVersion(
-                document_id=doc.id, version_no=next_ver, file_id=out.id, step_id=step.id,
-                created_by_id=uid, note=body.reason, created_at=now,
-            ))
-            me.status = "signed"
-            me.signed_at = now
-            me.remark = body.reason
-            me.signed_file_id = out.id
-            me.sign_job_id = job.id
-            doc.current_file_id = out.id
-            doc.updated_at = now
-
-            audit(
-                db, ip, "doc_sign", user=actor, document_id=doc.id, file_id=out.id,
-                file_sha256=cur_file.sha256, output_sha256=out.sha256, cert_key_ref=cert.key_ref,
-                detail=f"step={step.step_order} ver={next_ver}",
-                metadata={"step_id": step.id, "step_order": step.step_order, "version_no": next_ver,
-                          "remark": body.reason, "mode": body.mode, "level": body.level},
-                commit=False,
-            )
-
-            email_jobs: list[tuple[str, str, str]] = []
-            if will_complete_step:
-                if step.mode == "any":
-                    for other in other_pending:
-                        other.status = "skipped"
-                step.status = "completed"
-                step.completed_at = now
-
-                if body.next_action == "assign":
-                    next_step = _create_step(db, doc, step.step_order + 1, body.next_mode, uid, next_uids, now)
-                    doc.current_step_order = next_step.step_order
-                    audit(
-                        db, ip, "doc_assign", user=actor, document_id=doc.id, file_id=out.id,
-                        metadata={"step_id": next_step.id, "step_order": next_step.step_order,
-                                  "mode": body.next_mode, "assignee_ids": next_uids},
-                        commit=False,
+    t_lock = task_lock(pre_task.id) if pre_task is not None else nullcontext()
+    with t_lock:
+        with _doc_lock(doc_id):
+            actor, doc, step, assignees = _load_locked_doc_and_step(db, doc_id, uid)
+            linked_task = db.scalar(select(Task).where(Task.document_id == doc_id).with_for_update())
+            linked_todo = None
+            if linked_task is not None:
+                if body.next_action is not None:
+                    raise HTTPException(
+                        409,
+                        "Tài liệu đang gắn với quy trình công việc; việc chuyển bước được điều khiển tự động bởi quy trình",
                     )
-                    email_jobs = notify_users(
-                        db, st, next_uids, document_id=doc.id, kind="assigned",
-                        title=f"Cần ký tài liệu: {doc.title}",
-                        message=f"{_actor_label(actor)} đã chuyển tiếp cho bạn ký tài liệu \"{doc.title}\" (Bước {next_step.step_order}).",
-                        email_subject=f"[Ký số] Bạn được giao ký tài liệu: {doc.title}",
-                        commit=False,
+                if linked_task.archived_at is not None or linked_task.status != "processing":
+                    raise HTTPException(409, "Công việc gắn với tài liệu không còn ở trạng thái đang xử lý")
+                if step.task_id != linked_task.id:
+                    raise HTTPException(409, "Bước ký hiện tại không thuộc luồng xử lý của công việc")
+                in_stage = db.scalar(
+                    select(StageMember.user_id).where(
+                        StageMember.stage_id == linked_task.current_stage_id, StageMember.user_id == uid
                     )
-                elif body.next_action == "complete":
-                    doc.status = "completed"
-                    doc.completed_at = now
-                    audit(
-                        db, ip, "doc_complete", user=actor, document_id=doc.id,
-                        file_id=out.id, output_sha256=out.sha256,
-                        metadata={"final_version_no": next_ver}, commit=False,
-                    )
-                    recipients = _stakeholder_ids(db, doc) - {uid}
-                    email_jobs = notify_users(
-                        db, st, recipients, document_id=doc.id, kind="completed",
-                        title=f"Tài liệu hoàn tất: {doc.title}",
-                        message=f"Tài liệu \"{doc.title}\" đã hoàn tất đầy đủ chữ ký (người chốt: {_actor_label(actor)}).",
-                        email_subject=f"[Ký số] Tài liệu đã hoàn tất: {doc.title}",
-                        commit=False,
-                    )
+                )
+                if in_stage is None:
+                    raise HTTPException(403, "Chỉ thành viên bước ký (stage_members) mới được ký tài liệu này")
 
-            db.commit()
-            dispatch_emails(st, email_jobs)
-        except Exception:
-            db.rollback()
-            remove_from_disk(st, out.id)
-            raise
+            if step.status != "active":
+                raise HTTPException(409, "Bước hiện tại đã hoàn tất, không thể ký thêm")
+            me = next((a for a in assignees if a.user_id == uid), None)
+            if me is None:
+                raise HTTPException(403, "Bạn không được giao ký ở bước hiện tại")
+            if me.status == "signed":
+                raise HTTPException(409, "Bạn đã ký ở bước này rồi")
+            if me.status != "pending":
+                raise HTTPException(409, "Lượt ký của bạn không còn hiệu lực")
 
-        return {
-            "job_id": job.id,
-            "version_no": next_ver,
-            "step_completed": will_complete_step,
-            "document": _document_detail(db, st, doc, actor),
-        }
+            if linked_task is not None:
+                linked_todo = db.scalar(
+                    select(Todo)
+                    .where(
+                        Todo.task_id == linked_task.id,
+                        Todo.workflow_step_id == step.id,
+                        Todo.assignee_id == uid,
+                        Todo.status == "doing",
+                    )
+                    .with_for_update()
+                )
+                if linked_todo is None:
+                    raise HTTPException(403, "Bạn không có việc cần làm đang mở ở bước ký này")
+
+            other_pending = [a for a in assignees if a.id != me.id and a.status == "pending"]
+            will_complete_step = (step.mode == "any") or (len(other_pending) == 0)
+            if body.next_action is not None and not will_complete_step:
+                raise HTTPException(
+                    409, "Vẫn còn người ký khác chưa hoàn tất bước này; hãy ký trước, người ký cuối sẽ chuyển tiếp hoặc hoàn tất"
+                )
+            next_uids = _validate_assignees(db, body.next_assignee_ids) if body.next_action == "assign" else []
+
+            cur_file = _resolve_doc_file(db, doc)
+            actor_ctx = Ctx(user=actor, sess=ctx.sess, ip=ip)
+            task_id_val = linked_task.id if linked_task is not None else None
+            wf_id_val = linked_task.workflow_id if linked_task is not None else None
+            cert, pdf, info, img = validate_sign_inputs(
+                db, st, actor_ctx, body, cur_file,
+                document_id=doc.id, task_id=task_id_val, workflow_id=wf_id_val,
+            )
+
+            params = body.model_dump(exclude={"cert_id", "pin", "next_action", "next_assignee_ids", "next_mode"})
+            payload = {
+                "key_ref": cert.key_ref, "pdf_b64": b64(pdf), "image_b64": b64(img),
+                "mode": body.mode, "page": body.page, "box": body.box,
+                "reason": body.reason, "location": body.location, "title": body.title,
+                "show": body.show, "level": body.level,
+            }
+            try:
+                signed = signer_sign(st, payload)
+            except ValueError as exc:
+                db.add(SignJob(
+                    user_id=uid, input_file_id=cur_file.id, cert_id=cert.id,
+                    params_json=json.dumps(params), status="failed", error=str(exc)[:400], finished_at=utcnow(),
+                ))
+                audit(
+                    db, ip, "sign_failed", user=actor, status="error", document_id=doc.id,
+                    task_id=task_id_val, workflow_id=wf_id_val,
+                    file_id=cur_file.id, file_sha256=cur_file.sha256, cert_key_ref=cert.key_ref,
+                    detail=str(exc)[:300], commit=False,
+                )
+                db.commit()
+                raise HTTPException(400, str(exc))
+            except ServiceError as exc:
+                db.add(SignJob(
+                    user_id=uid, input_file_id=cur_file.id, cert_id=cert.id,
+                    params_json=json.dumps(params), status="failed", error=str(exc)[:400], finished_at=utcnow(),
+                ))
+                audit(
+                    db, ip, "sign_failed", user=actor, status="error", document_id=doc.id,
+                    task_id=task_id_val, workflow_id=wf_id_val,
+                    file_id=cur_file.id, file_sha256=cur_file.sha256, cert_key_ref=cert.key_ref,
+                    detail=str(exc)[:300], commit=False,
+                )
+                db.commit()
+                raise HTTPException(502, "Dịch vụ ký không khả dụng")
+
+            _, now = now_from_request(request)
+            next_ver = (db.scalar(select(func.max(DocumentVersion.version_no)).where(DocumentVersion.document_id == doc.id)) or 0) + 1
+            stem = cur_file.original_name[:-4] if cur_file.original_name.lower().endswith(".pdf") else cur_file.original_name
+            stem = re.sub(r"-v\d+$", "", re.sub(r"-signed(-\d+)?$", "", stem))
+
+            out = store_bytes(
+                db, st, actor, signed, kind="signed", name=f"{stem}-v{next_ver}.pdf",
+                pages=info["pages"], parent_id=cur_file.id, is_workflow=True, commit=False,
+            )
+            try:
+                job = SignJob(
+                    user_id=uid, input_file_id=cur_file.id, output_file_id=out.id, cert_id=cert.id,
+                    params_json=json.dumps(params), status="done", created_at=now, finished_at=now,
+                )
+                db.add(job)
+                db.flush()
+
+                db.add(DocumentVersion(
+                    document_id=doc.id, version_no=next_ver, file_id=out.id, step_id=step.id,
+                    created_by_id=uid, note=body.reason, created_at=now,
+                ))
+                me.status = "signed"
+                me.signed_at = now
+                me.remark = body.reason
+                me.signed_file_id = out.id
+                me.sign_job_id = job.id
+                doc.current_file_id = out.id
+                doc.updated_at = now
+
+                audit(
+                    db, ip, "doc_sign", user=actor, document_id=doc.id, file_id=out.id,
+                    task_id=task_id_val, workflow_id=wf_id_val,
+                    file_sha256=cur_file.sha256, output_sha256=out.sha256, cert_key_ref=cert.key_ref,
+                    detail=f"step={step.step_order} ver={next_ver}",
+                    metadata={"step_id": step.id, "step_order": step.step_order, "version_no": next_ver,
+                              "remark": body.reason, "mode": body.mode, "level": body.level},
+                    commit=False,
+                )
+
+                email_jobs: list[tuple[str, str, str]] = []
+                if linked_task is not None and linked_todo is not None:
+                    if will_complete_step:
+                        if step.mode == "any":
+                            for other in other_pending:
+                                other.status = "skipped"
+                        step.status = "completed"
+                        step.completed_at = now
+                    sign_result = json.dumps({
+                        "signer": actor.username,
+                        "display_name": actor.display_name,
+                        "signed_at": now.isoformat(),
+                        "version_no": next_ver,
+                        "file_id": out.id,
+                        "sign_job_id": job.id,
+                        "cert_key_ref": cert.key_ref,
+                    }, ensure_ascii=False)
+                    email_jobs = complete_todo(
+                        db, st, linked_todo, linked_task, actor, sign_result, now, ip, _signed_verified=True
+                    )
+                elif will_complete_step:
+                    if step.mode == "any":
+                        for other in other_pending:
+                            other.status = "skipped"
+                    step.status = "completed"
+                    step.completed_at = now
+
+                    if body.next_action == "assign":
+                        next_step = _create_step(db, doc, step.step_order + 1, body.next_mode, uid, next_uids, now)
+                        doc.current_step_order = next_step.step_order
+                        audit(
+                            db, ip, "doc_assign", user=actor, document_id=doc.id, file_id=out.id,
+                            metadata={"step_id": next_step.id, "step_order": next_step.step_order,
+                                      "mode": body.next_mode, "assignee_ids": next_uids},
+                            commit=False,
+                        )
+                        email_jobs = notify_users(
+                            db, st, next_uids, document_id=doc.id, kind="assigned",
+                            title=f"Cần ký tài liệu: {doc.title}",
+                            message=f"{_actor_label(actor)} đã chuyển tiếp cho bạn ký tài liệu \"{doc.title}\" (Bước {next_step.step_order}).",
+                            email_subject=f"[Ký số] Bạn được giao ký tài liệu: {doc.title}",
+                            commit=False,
+                        )
+                    elif body.next_action == "complete":
+                        doc.status = "completed"
+                        doc.completed_at = now
+                        audit(
+                            db, ip, "doc_complete", user=actor, document_id=doc.id,
+                            file_id=out.id, output_sha256=out.sha256,
+                            metadata={"final_version_no": next_ver}, commit=False,
+                        )
+                        recipients = _stakeholder_ids(db, doc) - {uid}
+                        email_jobs = notify_users(
+                            db, st, recipients, document_id=doc.id, kind="completed",
+                            title=f"Tài liệu hoàn tất: {doc.title}",
+                            message=f"Tài liệu \"{doc.title}\" đã hoàn tất đầy đủ chữ ký (người chốt: {_actor_label(actor)}).",
+                            email_subject=f"[Ký số] Tài liệu đã hoàn tất: {doc.title}",
+                            commit=False,
+                        )
+
+                db.commit()
+                dispatch_emails(st, email_jobs)
+            except Exception:
+                db.rollback()
+                remove_from_disk(st, out.id)
+                raise
+
+            out_payload = {
+                "job_id": job.id,
+                "version_no": next_ver,
+                "step_completed": will_complete_step,
+                "document": _document_detail(db, st, doc, actor),
+            }
+            if linked_task is not None:
+                out_payload["task_id"] = linked_task.id
+                out_payload["task_status"] = linked_task.status
+            return out_payload
 
 
 @router.post("/documents/{doc_id}/assign")
@@ -778,6 +856,8 @@ def assign_next_step(
 
     with _doc_lock(doc_id):
         actor, doc, step, assignees = _load_locked_doc_and_step(db, doc_id, uid)
+        if _linked_task(db, doc.id) is not None:
+            raise HTTPException(409, "Tài liệu đang gắn với quy trình công việc; không thể chuyển bước ngoài luồng")
         if step.status != "completed":
             raise HTTPException(409, "Bước hiện tại chưa hoàn tất")
         if _completing_signer_id(doc, step, assignees) != uid:
@@ -814,6 +894,8 @@ def complete_document(doc_id: str, request: Request, ctx: Ctx = Depends(require_
 
     with _doc_lock(doc_id):
         actor, doc, step, assignees = _load_locked_doc_and_step(db, doc_id, uid)
+        if _linked_task(db, doc.id) is not None:
+            raise HTTPException(409, "Tài liệu đang gắn với quy trình công việc; không thể chuyển bước ngoài luồng")
         if step.status != "completed":
             raise HTTPException(409, "Bước hiện tại chưa hoàn tất")
         if _completing_signer_id(doc, step, assignees) != uid:
@@ -848,48 +930,104 @@ def reject_document(
 ):
     st = request.app.state.settings
     _validate_uuid(doc_id)
-    verify_signing_pin(db, request, ctx, body.pin, action="doc_reject", document_id=doc_id)
+    pre_task = _linked_task(db, doc_id)
+    verify_signing_pin(
+        db, request, ctx, body.pin, action="doc_reject", document_id=doc_id,
+        task_id=pre_task.id if pre_task else None,
+        workflow_id=pre_task.workflow_id if pre_task else None,
+    )
     uid, ip = ctx.user.id, ctx.ip
 
-    with _doc_lock(doc_id):
-        actor, doc, step, assignees = _load_locked_doc_and_step(db, doc_id, uid)
-        if step.status != "active":
-            raise HTTPException(409, "Bước hiện tại đã hoàn tất, không thể từ chối")
-        me = next((a for a in assignees if a.user_id == uid), None)
-        if me is None:
-            raise HTTPException(403, "Bạn không được giao ký ở bước hiện tại")
-        if me.status != "pending":
-            raise HTTPException(409, "Lượt ký của bạn không còn ở trạng thái chờ")
+    t_lock = task_lock(pre_task.id) if pre_task is not None else nullcontext()
+    with t_lock:
+        with _doc_lock(doc_id):
+            actor, doc, step, assignees = _load_locked_doc_and_step(db, doc_id, uid)
+            linked_task = db.scalar(select(Task).where(Task.document_id == doc_id).with_for_update())
+            linked_todo = None
+            if linked_task is not None:
+                if body.failure_reason_id is None:
+                    raise HTTPException(
+                        400, "Bắt buộc chọn lý do thất bại (failure_reason_id) thuộc quy trình khi từ chối ký"
+                    )
+                if linked_task.archived_at is not None or linked_task.status != "processing":
+                    raise HTTPException(409, "Công việc gắn với tài liệu không còn ở trạng thái đang xử lý")
+                if step.task_id != linked_task.id:
+                    raise HTTPException(409, "Bước ký hiện tại không thuộc luồng xử lý của công việc")
+                in_stage = db.scalar(
+                    select(StageMember.user_id).where(
+                        StageMember.stage_id == linked_task.current_stage_id, StageMember.user_id == uid
+                    )
+                )
+                if in_stage is None:
+                    raise HTTPException(403, "Chỉ thành viên bước ký (stage_members) mới được từ chối tài liệu này")
 
-        now = utcnow()
-        me.status = "rejected"
-        me.signed_at = now
-        me.remark = body.reason
-        for other in assignees:
-            if other.id != me.id and other.status == "pending":
-                other.status = "skipped"
-        step.status = "rejected"
-        step.completed_at = now
-        doc.status = "rejected"
-        doc.rejected_at = now
-        doc.updated_at = now
+            if step.status != "active":
+                raise HTTPException(409, "Bước hiện tại đã hoàn tất, không thể từ chối")
+            me = next((a for a in assignees if a.user_id == uid), None)
+            if me is None:
+                raise HTTPException(403, "Bạn không được giao ký ở bước hiện tại")
+            if me.status != "pending":
+                raise HTTPException(409, "Lượt ký của bạn không còn ở trạng thái chờ")
 
-        audit(
-            db, ip, "doc_reject", user=actor, document_id=doc.id, file_id=doc.current_file_id,
-            detail=body.reason, metadata={"step_id": step.id, "step_order": step.step_order, "reason": body.reason},
-            commit=False,
-        )
-        recipients = _stakeholder_ids(db, doc, include_active_step=True) - {uid}
-        email_jobs = notify_users(
-            db, st, recipients, document_id=doc.id, kind="rejected",
-            title=f"Tài liệu bị từ chối: {doc.title}",
-            message=f"{_actor_label(actor)} đã từ chối ký tài liệu \"{doc.title}\": {body.reason}",
-            email_subject=f"[Ký số] Tài liệu bị từ chối: {doc.title}",
-            commit=False,
-        )
-        db.commit()
-        dispatch_emails(st, email_jobs)
-        return _document_detail(db, st, doc, actor)
+            if linked_task is not None:
+                linked_todo = db.scalar(
+                    select(Todo)
+                    .where(
+                        Todo.task_id == linked_task.id,
+                        Todo.workflow_step_id == step.id,
+                        Todo.assignee_id == uid,
+                        Todo.status == "doing",
+                    )
+                    .with_for_update()
+                )
+                if linked_todo is None:
+                    raise HTTPException(403, "Bạn không có việc cần làm đang mở ở bước ký này")
+
+            _, now = now_from_request(request)
+            me.status = "rejected"
+            me.signed_at = now
+            me.remark = body.reason
+            for other in assignees:
+                if other.id != me.id and other.status == "pending":
+                    other.status = "skipped"
+            step.status = "rejected"
+            step.completed_at = now
+            doc.status = "rejected"
+            doc.rejected_at = now
+            doc.updated_at = now
+
+            audit(
+                db, ip, "doc_reject", user=actor, document_id=doc.id, file_id=doc.current_file_id,
+                task_id=linked_task.id if linked_task is not None else None,
+                workflow_id=linked_task.workflow_id if linked_task is not None else None,
+                detail=body.reason,
+                metadata={
+                    "step_id": step.id, "step_order": step.step_order, "reason": body.reason,
+                    **({"failure_reason_id": body.failure_reason_id} if body.failure_reason_id is not None else {}),
+                },
+                commit=False,
+            )
+            if linked_task is not None and linked_todo is not None:
+                email_jobs = fail_todo(
+                    db, st, linked_todo, linked_task, actor, body.failure_reason_id, body.reason,
+                    now, ip, sync_document=False,
+                )
+            else:
+                recipients = _stakeholder_ids(db, doc, include_active_step=True) - {uid}
+                email_jobs = notify_users(
+                    db, st, recipients, document_id=doc.id, kind="rejected",
+                    title=f"Tài liệu bị từ chối: {doc.title}",
+                    message=f"{_actor_label(actor)} đã từ chối ký tài liệu \"{doc.title}\": {body.reason}",
+                    email_subject=f"[Ký số] Tài liệu bị từ chối: {doc.title}",
+                    commit=False,
+                )
+            db.commit()
+            dispatch_emails(st, email_jobs)
+            out = _document_detail(db, st, doc, actor)
+            if linked_task is not None:
+                out["task_id"] = linked_task.id
+                out["task_status"] = linked_task.status
+            return out
 
 
 @router.post("/documents/{doc_id}/cancel")
@@ -899,7 +1037,12 @@ def cancel_document(
 ):
     st = request.app.state.settings
     _validate_uuid(doc_id)
-    verify_signing_pin(db, request, ctx, body.pin if body else None, action="doc_cancel", document_id=doc_id)
+    pre_task = _linked_task(db, doc_id)
+    verify_signing_pin(
+        db, request, ctx, body.pin if body else None, action="doc_cancel", document_id=doc_id,
+        task_id=pre_task.id if pre_task else None,
+        workflow_id=pre_task.workflow_id if pre_task else None,
+    )
     uid, ip = ctx.user.id, ctx.ip
     reason = body.reason if body else ""
 
@@ -909,6 +1052,8 @@ def cancel_document(
         doc = db.scalar(select(Document).where(Document.id == doc_id).with_for_update())
         if actor is None or doc is None or not _can_view_document(db, doc, actor):
             raise HTTPException(404, "Không tìm thấy tài liệu")
+        if _linked_task(db, doc.id) is not None:
+            raise HTTPException(409, "Tài liệu đang gắn với quy trình công việc; hãy hủy qua API công việc")
         if doc.creator_id != uid and actor.role != "admin":
             raise HTTPException(403, "Chỉ người tạo tài liệu hoặc quản trị viên mới có thể hủy luồng")
         if doc.status != "in_progress":

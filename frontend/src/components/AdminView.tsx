@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { apiJson } from "../lib/api";
+import { ApiError, apiJson } from "../lib/api";
 
 interface AdminUser {
   id: number;
@@ -98,6 +98,7 @@ export function AdminView({ currentUserId }: { currentUserId?: number } = {}) {
   const [smtpResult, setSmtpResult] = useState<SmtpTestResult | null>(null);
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
+  const [deleteConflictUser, setDeleteConflictUser] = useState<AdminUser | null>(null);
 
   async function loadAll() {
     const [u, c, av, au, ew, ca, sm] = await Promise.all([
@@ -309,12 +310,16 @@ export function AdminView({ currentUserId }: { currentUserId?: number } = {}) {
     if (!window.confirm(`Xóa vĩnh viễn user "${u.username}"?${extra}`)) return;
     setErr("");
     setMsg("");
+    setDeleteConflictUser(null);
     setBusy(true);
     try {
       await apiJson(`/api/admin/users/${u.id}`, { method: "DELETE" });
       setMsg(`Đã xóa user "${u.username}"`);
       await loadAll();
     } catch (ex) {
+      if (ex instanceof ApiError && ex.status === 409) {
+        setDeleteConflictUser(u);
+      }
       setErr(ex instanceof Error ? ex.message : "Xóa user thất bại");
     } finally {
       setBusy(false);
@@ -370,7 +375,28 @@ export function AdminView({ currentUserId }: { currentUserId?: number } = {}) {
 
   return (
     <div className="stack">
-      {err && <div className="alert error">{err}</div>}
+      {err && <div className="alert error" data-testid="admin-error-banner">{err}</div>}
+      {deleteConflictUser && (
+        <div className="alert error row wrap" style={{ justifyContent: "space-between" }} data-testid="admin-delete-conflict-hint">
+          <span>
+            Tài khoản <strong>@{deleteConflictUser.username}</strong> đã có tài liệu, chữ ký hoặc lịch sử quy trình nên không thể xóa vĩnh viễn. Khuyến nghị dùng <strong>Vô hiệu hóa</strong> để khóa đăng nhập và bảo toàn truy vết.
+          </span>
+          {deleteConflictUser.is_active && (
+            <button
+              type="button"
+              className="btn tiny primary"
+              onClick={async () => {
+                const target = deleteConflictUser;
+                setDeleteConflictUser(null);
+                await toggleUserActive(target, false);
+              }}
+              data-testid="admin-conflict-disable-btn"
+            >
+              Vô hiệu hóa @{deleteConflictUser.username}
+            </button>
+          )}
+        </div>
+      )}
       {msg && <div className="alert ok">{msg}</div>}
 
       {warnings.length > 0 && (
